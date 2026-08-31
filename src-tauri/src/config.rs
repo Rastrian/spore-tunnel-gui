@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-const APP_DIR: &str = "bore-minecraft-tunnel";
+const APP_DIR: &str = "spore-tunnel-gui";
 const CONFIG_FILE: &str = "config.json";
-const KEYRING_SERVICE: &str = "bore-minecraft-tunnel";
+const KEYRING_SERVICE: &str = "spore-tunnel-gui";
 const KEYRING_USERNAME: &str = "bore-secret";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

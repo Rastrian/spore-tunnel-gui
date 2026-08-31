@@ -1,5 +1,7 @@
 # Bore Tunnel GUI
 
+> Forked from [bore-tunnel-gui](https://github.com/Rastrian/bore-tunnel-gui) (MIT).
+
 A lightweight Windows desktop app that exposes your local server to the internet in one click using the [Bore](https://github.com/ekzhang/bore) tunnel protocol. No CLI, no port forwarding, no dependencies — just a single installer.
 
 Implements the Bore protocol natively in Rust, so there's no external binaries or sidecars to manage. Works with any Bore-compatible server, including the public [bore.pub](https://bore.pub) relay. Great for making Minecraft servers, game hosts, or any local TCP service publicly accessible.
