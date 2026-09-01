@@ -600,4 +600,75 @@ mod tests {
         assert!(manager.wait_for(&id, &["connected"], WAIT).await.is_none());
         assert!(manager.all_statuses().await.is_empty());
     }
+
+    /// The full Phase 2 contract in one sequence: a pre-connect status,
+    /// `connected(port1)`, the DEATH signal while backing off, and
+    /// `connected(port2)` after the mock "restarts" and reassigns the
+    /// port. The manager keeps production backoff defaults (5 s base), so
+    /// the reconnect lands a few seconds after the death — this test
+    /// intentionally exercises the real timing.
+    #[tokio::test]
+    async fn event_stream_survives_mock_restart_with_new_port() {
+        let mock = mock().start().await.unwrap();
+        let (local, _h) = spawn_reply_once_service().await.unwrap();
+        let (sink, events) = recording_sink();
+        let manager = TunnelManager::new(sink);
+        let profile = profile_for(mock.control_addr().port(), local.port());
+        manager.start(profile.clone(), String::new()).await.unwrap();
+
+        let port1 = mock.assigned_port();
+        connected(&manager, &profile.id).await;
+        // …and its status event is on record (coalescing adds ≤ 1 s).
+        eventually(WAIT + Duration::from_secs(1), || {
+            statuses_of(&events, &profile.id)
+                .iter()
+                .any(|s| s.state == "connected" && s.assigned_remote_port == Some(port1))
+                .then_some(())
+        })
+        .await;
+
+        // "Server restart": the control connection dies and the NEXT
+        // handshake hands back a different port.
+        let port2 = port1 % 60_000 + 100;
+        assert_ne!(port1, port2);
+        mock.set_assigned_port(port2);
+        mock.drop_control().await;
+
+        let statuses = eventually(Duration::from_secs(20), || {
+            let s = statuses_of(&events, &profile.id);
+            let i1 = s.iter().position(|x| {
+                x.state == "connected" && x.assigned_remote_port == Some(port1)
+            })?;
+            let i2 = (i1 + 1..s.len()).find(|&i| {
+                s[i].state == "connected" && s[i].assigned_remote_port == Some(port2)
+            })?;
+            let died_between = s[i1 + 1..i2]
+                .iter()
+                .any(|x| x.reconnects >= 1 && x.last_error.is_some());
+            died_between.then_some(s)
+        })
+        .await;
+
+        // Order: pre-connect status (a fast localhost connect goes
+        // `idle → connected` without ever pausing in `starting`) …
+        assert!(matches!(
+            statuses.first().expect("at least one status").state.as_str(),
+            "idle" | "starting" | "connected"
+        ));
+        // … the death also surfaced as an error log line.
+        let logs = logs_of_events(&events, &profile.id);
+        assert!(
+            logs.iter()
+                .any(|e| e.level == LogLevel::Error && e.line.contains("tunnel down")),
+            "logs: {logs:?}"
+        );
+        // … and the manager state agrees with the stream.
+        let final_status = manager.status_of(&profile.id).await.unwrap();
+        assert_eq!(final_status.state, "connected");
+        assert_eq!(final_status.assigned_remote_port, Some(port2));
+        assert_eq!(final_status.reconnects, 1);
+
+        manager.stop_all().await;
+        mock.stop().await;
+    }
 }
