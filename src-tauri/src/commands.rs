@@ -1,10 +1,16 @@
-use crate::bore::{BoreClient, TunnelStatus};
 use crate::config::{self, AppConfig};
+use spore_tunnel_gui::tunnel::client::TunnelConfig;
+use spore_tunnel_gui::tunnel::supervisor::{SupervisorConfig, TunnelStatus, TunnelSupervisor};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tauri::State;
 
-pub type TunnelState = Arc<Mutex<BoreClient>>;
+pub type TunnelState = Arc<Mutex<TunnelSupervisor>>;
+
+/// How long `start_tunnel` waits for the first connect attempt to settle
+/// before returning the (still starting) status.
+const CONNECT_RESULT_WAIT: Duration = Duration::from_secs(3);
 
 #[tauri::command]
 pub async fn load_config_cmd() -> Result<AppConfig, String> {
@@ -39,38 +45,45 @@ pub async fn start_tunnel(
         let _ = config::save_secret(&secret);
     }
 
-    let mut client = state.lock().await;
+    let supervisor_config = SupervisorConfig::new(
+        TunnelConfig {
+            server: config.bore_server_host.clone(),
+            control_port: config.bore_server_port.unwrap_or(7835),
+            remote_port: config.remote_port,
+        },
+        secret,
+        config.local_host.clone(),
+        config.local_port,
+    );
 
-    client
-        .start(
-            &config.bore_server_host,
-            config.bore_server_port.unwrap_or(7835),
-            config.local_port,
-            config.remote_port,
-            &secret,
-        )
-        .await?;
+    let supervisor = state.lock().await;
+    supervisor.start(supervisor_config).await?;
 
-    Ok(client.status().await)
+    Ok(supervisor
+        .wait_for(&["connected", "failed"], CONNECT_RESULT_WAIT)
+        .await)
 }
 
 #[tauri::command]
 pub async fn stop_tunnel(state: State<'_, TunnelState>) -> Result<(), String> {
-    let mut client = state.lock().await;
-    client.stop().await
+    let supervisor = state.lock().await;
+    supervisor.stop().await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn get_status(state: State<'_, TunnelState>) -> Result<TunnelStatus, String> {
-    let client = state.lock().await;
-    Ok(client.status().await)
+    let supervisor = state.lock().await;
+    Ok(supervisor.status())
 }
 
 #[tauri::command]
 pub async fn copy_address(state: State<'_, TunnelState>) -> Result<String, String> {
-    let client = state.lock().await;
-    let s = client.status().await;
-    s.remote_address.ok_or_else(|| "No remote address available.".to_string())
+    let supervisor = state.lock().await;
+    let status = supervisor.status();
+    status
+        .remote_address
+        .ok_or_else(|| "No remote address available.".to_string())
 }
 
 #[tauri::command]
