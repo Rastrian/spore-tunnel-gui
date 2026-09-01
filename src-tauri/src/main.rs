@@ -103,6 +103,7 @@ pub fn run() {
             commands::detect_local_service,
             commands::get_ui_prefs,
             commands::update_ui_prefs,
+            commands::check_for_updates,
         ])
         .run(tauri::generate_context!());
 

@@ -9,6 +9,7 @@ import type {
   ProfileStatus,
   TunnelStatus,
   UiPrefs,
+  UpdateStatus,
 } from "./types";
 
 export function listProfiles(): Promise<Profile[]> {
@@ -70,6 +71,14 @@ export function openConfigFolder(): Promise<void> {
 
 export function detectLocalService(): Promise<DetectedService[]> {
   return invoke<DetectedService[]>("detect_local_service");
+}
+
+// ---------------------------------------------------------------------
+// Update check (Rust side: check_for_updates over the GitHub releases API)
+// ---------------------------------------------------------------------
+
+export function checkForUpdates(): Promise<UpdateStatus> {
+  return invoke<UpdateStatus>("check_for_updates");
 }
 
 // ---------------------------------------------------------------------

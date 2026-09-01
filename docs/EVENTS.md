@@ -239,6 +239,7 @@ Profile fields: see `Profile` above.
 | `detect_local_service`  | —                                      | `DetectedService[]` (see `src-tauri/src/discover.rs`) |
 | `get_ui_prefs`          | —                                      | `UiPrefs`                      |
 | `update_ui_prefs`      | `prefs: UiPrefs`                       | `UiPrefs` (persisted)          |
+| `check_for_updates`    | —                                      | `UpdateStatus` (`{ current, latest, updateAvailable, url }`, see `src-tauri/src/updates.rs`; on-demand network call to the GitHub releases API) |
 
 Secrets never appear in profile objects or config files — they are written
 through `set_profile_secret` (or the `start_tunnel` argument) into the OS

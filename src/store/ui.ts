@@ -3,6 +3,7 @@
 
 import { create } from "zustand";
 import { setActiveProfile } from "../lib/api";
+import type { UpdateStatus } from "../lib/types";
 
 export type MainView = "dashboard" | "settings";
 
@@ -15,6 +16,9 @@ interface UiStore {
   wizardOpen: boolean;
   /** Transient error toast (invoke failures surfaced as strings). */
   toast: string | null;
+  /** Latest update-check result while an update is available; the shell
+   *  renders a banner from it until dismissed or a calm re-check. */
+  updateBanner: UpdateStatus | null;
 
   selectProfile(profileId: string): void;
   /** Silent selection (auto-select after hydration / after a delete). */
@@ -28,6 +32,8 @@ interface UiStore {
   closeWizard(): void;
   showToast(message: string): void;
   dismissToast(): void;
+  showUpdateBanner(update: UpdateStatus): void;
+  dismissUpdateBanner(): void;
 }
 
 /** Auto-clear toast after this long (display feedback, not polling). */
@@ -40,6 +46,7 @@ export const useUi = create<UiStore>()((set) => ({
   editor: { open: false, profileId: null },
   wizardOpen: false,
   toast: null,
+  updateBanner: null,
 
   selectProfile: (profileId) => {
     set({ view: "dashboard", selectedProfileId: profileId });
@@ -69,4 +76,6 @@ export const useUi = create<UiStore>()((set) => ({
     window.clearTimeout(toastTimer);
     set({ toast: null });
   },
+  showUpdateBanner: (update) => set({ updateBanner: update }),
+  dismissUpdateBanner: () => set({ updateBanner: null }),
 }));

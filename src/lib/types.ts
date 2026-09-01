@@ -95,3 +95,12 @@ export interface DetectedService {
   port: number;
   name: string;
 }
+
+/** Result of `check_for_updates` (src-tauri/src/updates.rs). */
+export interface UpdateStatus {
+  current: string;
+  latest: string;
+  updateAvailable: boolean;
+  /** Release page to open in a browser. */
+  url: string;
+}
