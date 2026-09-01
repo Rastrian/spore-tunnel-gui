@@ -2,7 +2,14 @@
 // argument keys to the snake_case Rust parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { DetectedService, LogEntry, Profile, ProfileStatus, TunnelStatus } from "./types";
+import type {
+  DetectedService,
+  LogEntry,
+  Profile,
+  ProfileStatus,
+  TunnelStatus,
+  UiPrefs,
+} from "./types";
 
 export function listProfiles(): Promise<Profile[]> {
   return invoke<Profile[]>("list_profiles");
@@ -63,4 +70,17 @@ export function openConfigFolder(): Promise<void> {
 
 export function detectLocalService(): Promise<DetectedService[]> {
   return invoke<DetectedService[]>("detect_local_service");
+}
+
+// ---------------------------------------------------------------------
+// UI preferences (persisted in AppConfig.ui — Rust side: get_ui_prefs /
+// update_ui_prefs commands)
+// ---------------------------------------------------------------------
+
+export function getUiPrefs(): Promise<UiPrefs> {
+  return invoke<UiPrefs>("get_ui_prefs");
+}
+
+export function updateUiPrefs(prefs: UiPrefs): Promise<UiPrefs> {
+  return invoke<UiPrefs>("update_ui_prefs", { prefs });
 }
