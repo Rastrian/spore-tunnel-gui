@@ -5,20 +5,12 @@ import { Toast } from "./components/Toast";
 import { ProfileEditor, newDraftProfile } from "./components/ProfileEditor";
 import { DashboardView } from "./views/DashboardView";
 import { EmptyState } from "./views/EmptyState";
+import { SettingsView } from "./views/SettingsView";
 import { WizardView } from "./views/WizardView";
 import { initTunnelEvents } from "./store/events";
 import { useTunnels } from "./store/tunnels";
 import { useUi } from "./store/ui";
 import { applyTheme, watchSystemTheme } from "./lib/theme";
-
-/** Temporary pane for views landing in later commits of this phase. */
-function ComingSoon({ title }: { title: string }) {
-  return (
-    <div className="flex h-full items-center justify-center text-[13.5px] text-dim">
-      {title} — landing in the next change.
-    </div>
-  );
-}
 
 function LoadingScreen() {
   return (
@@ -80,7 +72,7 @@ export default function App() {
   let main: ReactNode;
   if (!hydrated) main = <LoadingScreen />;
   else if (wizardOpen) main = <WizardView />;
-  else if (view === "settings") main = <ComingSoon title="Settings" />;
+  else if (view === "settings") main = <SettingsView />;
   else if (selected) main = <DashboardView profile={selected} />;
   else main = <EmptyState />;
 
