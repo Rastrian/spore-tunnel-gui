@@ -105,6 +105,10 @@ impl MockServerBuilder {
         self
     }
 
+    /// Cadence of the server-originated keepalive on the control
+    /// connection (Bore dialect: bare-string Heartbeat, like the real
+    /// server's ~500 ms loop; Spore dialect: `Ack`). Unset (default) keeps
+    /// the connection silent.
     pub fn ack_interval(mut self, interval: Duration) -> Self {
         self.ack_interval = Some(interval);
         self
@@ -363,10 +367,16 @@ async fn handle_conn(
         _ => return,
     }
 
-    // Established control loop: pump Acks, relay on-demand Connection frames.
+    // Established control loop: pump keepalives, relay on-demand Connection
+    // frames. The keepalive payload mirrors the real servers: bore sends
+    // bare-string Heartbeats, Spore sends Acks.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     *shared.control_tx.lock().unwrap() = Some(cmd_tx);
-    let send_acks = shared.ack_interval.is_some();
+    let send_keepalives = shared.ack_interval.is_some();
+    let keepalive = match shared.dialect {
+        Dialect::Bore => ServerMessage::Heartbeat,
+        Dialect::Spore => ServerMessage::Ack,
+    };
     let mut ticker =
         tokio::time::interval(shared.ack_interval.unwrap_or(Duration::from_secs(3600)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -378,7 +388,8 @@ async fn handle_conn(
                 }
             }
             frame = reader.next_frame() => match frame {
-                // Heartbeats and anything else the client sends: ignored.
+                // Anything the client sends: ignored (real clients are
+                // silent on the control plane after the handshake).
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             },
@@ -391,7 +402,7 @@ async fn handle_conn(
                 Some(ConnCmd::Close) | None => break,
             },
             _ = ticker.tick() => {
-                if send_acks && send(&mut wh, &ServerMessage::Ack).await.is_err() {
+                if send_keepalives && send(&mut wh, &keepalive).await.is_err() {
                     break;
                 }
             }
@@ -683,6 +694,64 @@ mod tests {
         ));
         assert!(matches!(client.recv().await, Some(ServerMessage::Ack)));
         assert!(matches!(client.recv().await, Some(ServerMessage::Ack)));
+        mock.stop().await;
+    }
+
+    #[tokio::test]
+    async fn bore_keepalives_are_bare_string_heartbeats() {
+        // Real bore servers send ServerMessage::Heartbeat (the bare string
+        // "Heartbeat" + NUL) on the control connection; the mock must speak
+        // that dialect too, not Spore's Ack.
+        let mock = mock()
+            .ack_interval(Duration::from_millis(30))
+            .start()
+            .await
+            .unwrap();
+        let mut client = RawClient::connect(mock.control_addr()).await;
+        client.send(&ClientMessage::Hello(0)).await;
+        assert!(matches!(client.recv().await, Some(ServerMessage::Hello(_))));
+        assert!(matches!(
+            client.recv().await,
+            Some(ServerMessage::Heartbeat)
+        ));
+        assert!(matches!(
+            client.recv().await,
+            Some(ServerMessage::Heartbeat)
+        ));
+        mock.stop().await;
+    }
+
+    #[tokio::test]
+    async fn bore_keepalive_wire_bytes_are_bare_heartbeat_plus_nul() {
+        // Pin the raw wire: the keepalive frame must be exactly
+        // b"\"Heartbeat\"\0" with no length prefix and no tag.
+        let mock = mock()
+            .ack_interval(Duration::from_millis(20))
+            .start()
+            .await
+            .unwrap();
+        let mut client = RawClient::connect(mock.control_addr()).await;
+        client.send(&ClientMessage::Hello(0)).await;
+        let hello = encode_frame(&ServerMessage::Hello(mock.assigned_port())).unwrap();
+        let want = hello.len() + b"\"Heartbeat\"\0".len();
+        // Buffer raw bytes until the handshake reply AND the first
+        // keepalive frame have arrived.
+        let mut chunk = [0u8; 4096];
+        let mut wire = Vec::new();
+        while wire.len() < want {
+            let n = timeout(HANDSHAKE_WAIT, client.stream.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(n > 0, "connection closed before the keepalive arrived");
+            client.decoder.push(&chunk[..n]);
+            wire.extend_from_slice(&chunk[..n]);
+        }
+        assert!(wire.starts_with(&hello), "wire: {wire:?}");
+        assert_eq!(
+            &wire[hello.len()..want],
+            b"\"Heartbeat\"\0"
+        );
         mock.stop().await;
     }
 
