@@ -2,8 +2,10 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Toast } from "./components/Toast";
+import { ProfileEditor, newDraftProfile } from "./components/ProfileEditor";
 import { DashboardView } from "./views/DashboardView";
 import { EmptyState } from "./views/EmptyState";
+import { WizardView } from "./views/WizardView";
 import { initTunnelEvents } from "./store/events";
 import { useTunnels } from "./store/tunnels";
 import { useUi } from "./store/ui";
@@ -33,6 +35,7 @@ export default function App() {
   const view = useUi((s) => s.view);
   const selectedProfileId = useUi((s) => s.selectedProfileId);
   const wizardOpen = useUi((s) => s.wizardOpen);
+  const editor = useUi((s) => s.editor);
   const setSelection = useUi((s) => s.setSelection);
 
   // Event subscriptions + one-shot hydration. StrictMode-safe (module-level
@@ -70,10 +73,13 @@ export default function App() {
   }, [hydrated, profiles, selectedProfileId, setSelection]);
 
   const selected = profiles.find((p) => p.id === selectedProfileId) ?? null;
+  const editing = editor.profileId
+    ? (profiles.find((p) => p.id === editor.profileId) ?? null)
+    : null;
 
   let main: ReactNode;
   if (!hydrated) main = <LoadingScreen />;
-  else if (wizardOpen) main = <ComingSoon title="Onboarding wizard" />;
+  else if (wizardOpen) main = <WizardView />;
   else if (view === "settings") main = <ComingSoon title="Settings" />;
   else if (selected) main = <DashboardView profile={selected} />;
   else main = <EmptyState />;
@@ -82,6 +88,9 @@ export default function App() {
     <div className="relative flex h-full w-full overflow-hidden bg-base font-sans text-ink">
       <Sidebar />
       <main className="relative min-w-0 flex-1 overflow-y-auto">{main}</main>
+      {/* New profile = fresh draft (the editor copies it into local state
+          on mount, so re-renders never reset what the user typed). */}
+      {editor.open && <ProfileEditor profile={editing ?? newDraftProfile()} />}
       <Toast />
     </div>
   );
