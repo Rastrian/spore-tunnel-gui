@@ -9,9 +9,14 @@ export interface AppConfig {
 
 export interface TunnelStatus {
   state: "idle" | "starting" | "connected" | "failed" | "stopped";
+  server_kind?: string; // "Bore" | "Spore"
   local_address: string;
   remote_address?: string;
   assigned_remote_port?: number;
+  uptime_secs?: number;
+  bytes_up?: number;
+  bytes_down?: number;
+  reconnects?: number;
   pid?: number;
   last_error?: string;
   logs: string[];
