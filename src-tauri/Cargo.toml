@@ -26,6 +26,7 @@ semver = "1"
 # Update checker only: no default features (drops native-tls & friends),
 # rustls keeps the binary lean and CI-safe.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
