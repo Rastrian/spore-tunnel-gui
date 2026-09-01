@@ -1,23 +1,68 @@
-export interface AppConfig {
-  bore_server_host: string;
-  bore_server_port?: number;
-  local_host: string;
-  local_port: number;
-  remote_port: number;
-  profile_name?: string;
+// camelCase mirrors of the Rust types in src-tauri/src (config.rs,
+// tunnel/supervisor.rs, tunnel/events.rs, commands.rs). Keep in sync.
+
+export type Theme = "dark" | "light" | "system";
+
+export interface Profile {
+  id: string;
+  name: string;
+  serverHost: string;
+  serverPort: number;
+  localHost: string;
+  localPort: number;
+  /** 0 = random (server assigns). */
+  remotePort: number;
+  autostart: boolean;
+  autoReconnect: boolean;
 }
 
+export interface UiPrefs {
+  theme: Theme;
+  startMinimized: boolean;
+  closeToTray: boolean;
+}
+
+export interface AppConfig {
+  profiles: Profile[];
+  activeProfileId?: string;
+  ui: UiPrefs;
+}
+
+export type TunnelState =
+  | "idle"
+  | "starting"
+  | "connected"
+  | "failed"
+  | "stopped";
+
 export interface TunnelStatus {
-  state: "idle" | "starting" | "connected" | "failed" | "stopped";
-  server_kind?: string; // "Bore" | "Spore"
-  local_address: string;
-  remote_address?: string;
-  assigned_remote_port?: number;
-  uptime_secs?: number;
-  bytes_up?: number;
-  bytes_down?: number;
+  state: TunnelState;
+  /** "Bore" | "Spore" once the handshake identified the server. */
+  serverKind?: string;
+  localAddress: string;
+  remoteAddress?: string;
+  assignedRemotePort?: number;
+  uptimeSecs?: number;
+  bytesUp?: number;
+  bytesDown?: number;
   reconnects?: number;
-  pid?: number;
-  last_error?: string;
+  lastError?: string;
   logs: string[];
+}
+
+export interface LogEntry {
+  index: number;
+  ts: number;
+  level: "info" | "error";
+  line: string;
+}
+
+export interface ProfileStatus {
+  profileId: string;
+  status: TunnelStatus;
+}
+
+export interface DetectedService {
+  port: number;
+  name: string;
 }

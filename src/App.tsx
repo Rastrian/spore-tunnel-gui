@@ -1,13 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { AppConfig, TunnelStatus } from "./lib/types";
+import type { Profile, TunnelStatus } from "./lib/types";
 import * as api from "./lib/api";
-
-const DEFAULT_CONFIG: AppConfig = {
-  bore_server_host: "",
-  local_host: "127.0.0.1",
-  local_port: 25565,
-  remote_port: 0,
-};
 
 const STATUS_COLORS: Record<string, string> = {
   idle: "#888",
@@ -17,19 +10,36 @@ const STATUS_COLORS: Record<string, string> = {
   stopped: "#888",
 };
 
+/** Draft for the very first profile (nothing saved on the backend yet). */
+function newDraftProfile(): Profile {
+  return {
+    id: crypto.randomUUID(),
+    name: "My tunnel",
+    serverHost: "",
+    serverPort: 7835,
+    localHost: "127.0.0.1",
+    localPort: 25565,
+    remotePort: 0,
+    autostart: false,
+    autoReconnect: true,
+  };
+}
+
 export default function App() {
-  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
+  // The single-tunnel UI edits the working profile (the first configured
+  // one; the backend keeps it active). A fresh draft is created when no
+  // profile exists yet.
+  const [profile, setProfile] = useState<Profile>(newDraftProfile);
   const [secret, setSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [status, setStatus] = useState<TunnelStatus | null>(null);
   const [error, setError] = useState("");
   const [copyFeedback, setCopyFeedback] = useState("");
-  const [hasStoredSecret, setHasStoredSecret] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
-    loadData();
+    load();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
 
@@ -39,11 +49,11 @@ export default function App() {
     }
   }, [status?.logs]);
 
-  const startPolling = useCallback(() => {
+  const startPolling = useCallback((profileId: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = window.setInterval(async () => {
       try {
-        const s = await api.getStatus();
+        const s = await api.getStatus(profileId);
         setStatus(s);
         if (s.state === "stopped" || s.state === "failed") {
           if (pollRef.current) clearInterval(pollRef.current);
@@ -53,27 +63,34 @@ export default function App() {
     }, 2000);
   }, []);
 
-  async function loadData() {
+  async function load() {
     try {
-      const [cfg, has] = await Promise.all([api.loadConfig(), api.hasSecret()]);
-      setConfig(cfg);
-      setHasStoredSecret(has);
-      const s = await api.getStatus();
-      setStatus(s);
-      if (s.state === "starting" || s.state === "connected") {
-        startPolling();
+      const [profiles, all] = await Promise.all([api.listProfiles(), api.getAllStatus()]);
+      if (profiles.length === 0) return;
+      const working = profiles[0];
+      setProfile(working);
+      const current = all.find(s => s.profileId === working.id)?.status ?? null;
+      setStatus(current);
+      if (current && (current.state === "starting" || current.state === "connected")) {
+        startPolling(working.id);
       }
     } catch { /* first load, no config yet */ }
   }
 
-  async function handleSaveConfig() {
+  /** Save the form as the profile (plus the secret, when entered). */
+  async function persistProfile(): Promise<Profile> {
+    const saved = await api.saveProfile(profile);
+    setProfile(saved);
+    if (secret.trim()) {
+      await api.setProfileSecret(saved.id, secret.trim());
+    }
+    return saved;
+  }
+
+  async function handleSave() {
     try {
       setError("");
-      await api.saveConfig(config);
-      if (secret) {
-        await api.saveSecret(secret);
-        setHasStoredSecret(true);
-      }
+      await persistProfile();
     } catch (e) {
       setError(String(e));
     }
@@ -82,9 +99,11 @@ export default function App() {
   async function handleStart() {
     try {
       setError("");
-      const s = await api.startTunnel(config, secret);
+      // Start always saves first: the tunnel runs what the form shows.
+      const saved = await persistProfile();
+      const s = await api.startTunnel(saved.id, secret.trim() || undefined);
       setStatus(s);
-      startPolling();
+      startPolling(saved.id);
     } catch (e) {
       setError(String(e));
     }
@@ -93,8 +112,8 @@ export default function App() {
   async function handleStop() {
     try {
       setError("");
-      await api.stopTunnel();
-      const s = await api.getStatus();
+      await api.stopTunnel(profile.id);
+      const s = await api.getStatus(profile.id);
       setStatus(s);
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
@@ -105,7 +124,7 @@ export default function App() {
 
   async function handleCopy() {
     try {
-      const addr = await api.copyAddress();
+      const addr = await api.copyAddress(profile.id);
       await navigator.clipboard.writeText(addr);
       setCopyFeedback("Copied!");
       setTimeout(() => setCopyFeedback(""), 2000);
@@ -116,7 +135,7 @@ export default function App() {
 
   const state = status?.state ?? "idle";
   const isRunning = state === "starting" || state === "connected";
-  const remoteAddr = status?.remote_address;
+  const remoteAddr = status?.remoteAddress;
 
   return (
     <div className="app">
@@ -124,12 +143,21 @@ export default function App() {
 
       <section className="section">
         <label>
-          Bore server host
+          Profile name
+          <input
+            type="text"
+            value={profile.name}
+            onChange={e => setProfile({ ...profile, name: e.target.value })}
+          />
+        </label>
+
+        <label>
+          Tunnel server host
           <input
             type="text"
             placeholder="bore.example.com"
-            value={config.bore_server_host}
-            onChange={e => setConfig({ ...config, bore_server_host: e.target.value })}
+            value={profile.serverHost}
+            onChange={e => setProfile({ ...profile, serverHost: e.target.value })}
           />
         </label>
 
@@ -138,7 +166,7 @@ export default function App() {
           <div className="secret-row">
             <input
               type={showSecret ? "text" : "password"}
-              placeholder={hasStoredSecret ? "(stored)" : "Optional — leave empty for public servers"}
+              placeholder="Optional — leave empty for public servers"
               value={secret}
               onChange={e => setSecret(e.target.value)}
             />
@@ -150,21 +178,38 @@ export default function App() {
 
         <div className="row">
           <label className="small">
+            Server port
+            <input
+              type="number"
+              value={profile.serverPort}
+              onChange={e => setProfile({ ...profile, serverPort: Number(e.target.value) })}
+            />
+          </label>
+          <label className="small">
             Local port
             <input
               type="number"
-              value={config.local_port}
-              onChange={e => setConfig({ ...config, local_port: Number(e.target.value) })}
+              value={profile.localPort}
+              onChange={e => setProfile({ ...profile, localPort: Number(e.target.value) })}
             />
           </label>
           <label className="small">
             Remote port
-            <input type="number" value={config.remote_port} disabled title="0 = random" />
+            <input type="number" value={profile.remotePort} disabled title="0 = random" />
           </label>
         </div>
 
-        <button className="btn-secondary" onClick={handleSaveConfig}>
-          Save Config
+        <label>
+          <input
+            type="checkbox"
+            checked={profile.autoReconnect}
+            onChange={e => setProfile({ ...profile, autoReconnect: e.target.checked })}
+          />
+          Reconnect automatically when the tunnel drops
+        </label>
+
+        <button className="btn-secondary" onClick={handleSave}>
+          Save Profile
         </button>
         <button className="btn-secondary" onClick={() => api.openConfigFolder()}>
           Open Config Folder
@@ -176,7 +221,7 @@ export default function App() {
           <button
             className="btn-primary"
             onClick={handleStart}
-            disabled={isRunning || !config.bore_server_host}
+            disabled={isRunning || !profile.serverHost.trim()}
           >
             Start Tunnel
           </button>
@@ -207,8 +252,8 @@ export default function App() {
             </div>
           )}
 
-          {status?.last_error && (
-            <div className="error-inline">{status.last_error}</div>
+          {status?.lastError && (
+            <div className="error-inline">{status.lastError}</div>
           )}
         </div>
       </section>

@@ -1,88 +1,232 @@
-use crate::config::{self, AppConfig};
-use spore_tunnel_gui::tunnel::client::TunnelConfig;
-use spore_tunnel_gui::tunnel::supervisor::{SupervisorConfig, TunnelStatus, TunnelSupervisor};
+//! Tauri command surface: profiles (config + keyring) and tunnels
+//! (manager), mapping the old single-tunnel UI onto the ACTIVE profile.
+
+use spore_tunnel_gui::config::{self, Profile, SecretStore, CONFIG_FILE, KEYRING_SERVICE};
+use spore_tunnel_gui::discover;
+use spore_tunnel_gui::tunnel::events::LogEntry;
+use spore_tunnel_gui::tunnel::manager::TunnelManager;
+use spore_tunnel_gui::tunnel::supervisor::TunnelStatus;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 use tauri::State;
-
-pub type TunnelState = Arc<Mutex<TunnelSupervisor>>;
 
 /// How long `start_tunnel` waits for the first connect attempt to settle
 /// before returning the (still starting) status.
 const CONNECT_RESULT_WAIT: Duration = Duration::from_secs(3);
 
-#[tauri::command]
-pub async fn load_config_cmd() -> Result<AppConfig, String> {
-    config::load_config()
+/// One entry of `get_all_status`: a configured profile plus its tunnel
+/// status (idle default when it has never been started).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileStatus {
+    pub profile_id: uuid::Uuid,
+    pub status: TunnelStatus,
 }
 
+// ---------------------------------------------------------------------
+// Profiles
+// ---------------------------------------------------------------------
+
 #[tauri::command]
-pub async fn save_config_cmd(config: AppConfig) -> Result<(), String> {
-    config::save_config(&config)
+pub async fn list_profiles() -> Result<Vec<Profile>, String> {
+    Ok(config::load_config()?.profiles)
 }
 
+/// Upsert a profile by id, with validation. Trims `name`/`server_host`.
 #[tauri::command]
-pub async fn save_secret_cmd(secret: String) -> Result<(), String> {
-    config::save_secret(secret.trim())
-}
-
-#[tauri::command]
-pub async fn has_secret_cmd() -> Result<bool, String> {
-    Ok(config::has_secret())
-}
-
-#[tauri::command]
-pub async fn start_tunnel(
-    state: State<'_, TunnelState>,
-    config: AppConfig,
-    secret: String,
-) -> Result<TunnelStatus, String> {
-    let secret = secret.trim().to_string();
-
-    // Try to save to keyring for next time (best-effort, don't fail if it doesn't work)
-    if !secret.is_empty() {
-        let _ = config::save_secret(&secret);
+pub async fn save_profile(profile: Profile) -> Result<Profile, String> {
+    let mut cfg = config::load_config()?;
+    let profile = normalize_profile(profile, &cfg.profiles)?;
+    match cfg.profiles.iter_mut().find(|p| p.id == profile.id) {
+        Some(existing) => *existing = profile.clone(),
+        None => cfg.profiles.push(profile.clone()),
     }
-
-    let supervisor_config = SupervisorConfig::new(
-        TunnelConfig {
-            server: config.bore_server_host.clone(),
-            control_port: config.bore_server_port.unwrap_or(7835),
-            remote_port: config.remote_port,
-        },
-        secret,
-        config.local_host.clone(),
-        config.local_port,
-    );
-
-    let supervisor = state.lock().await;
-    supervisor.start(supervisor_config).await?;
-
-    Ok(supervisor
-        .wait_for(&["connected", "failed"], CONNECT_RESULT_WAIT)
-        .await)
+    if cfg.active_profile_id.is_none() {
+        cfg.active_profile_id = Some(profile.id);
+    }
+    config::save_config(&cfg)?;
+    Ok(profile)
 }
 
 #[tauri::command]
-pub async fn stop_tunnel(state: State<'_, TunnelState>) -> Result<(), String> {
-    let supervisor = state.lock().await;
-    supervisor.stop().await;
+pub async fn set_active_profile(profile_id: uuid::Uuid) -> Result<(), String> {
+    let mut cfg = config::load_config()?;
+    if !cfg.profiles.iter().any(|p| p.id == profile_id) {
+        return Err(format!("Profile {profile_id} not found."));
+    }
+    cfg.active_profile_id = Some(profile_id);
+    config::save_config(&cfg)
+}
+
+/// Store (or, when empty/whitespace, delete) a profile's tunnel secret.
+#[tauri::command]
+pub async fn set_profile_secret(
+    profile_id: uuid::Uuid,
+    secret: String,
+    store: State<'_, Arc<dyn SecretStore>>,
+) -> Result<(), String> {
+    let secret = secret.trim();
+    let user = config::profile_secret_user(profile_id);
+    if secret.is_empty() {
+        // Absent entries are already "deleted"; ignore store errors here.
+        let _ = store.delete_secret(KEYRING_SERVICE, &user);
+        Ok(())
+    } else {
+        store.set_secret(KEYRING_SERVICE, &user, secret)
+    }
+}
+
+#[tauri::command]
+pub async fn delete_profile(
+    profile_id: uuid::Uuid,
+    manager: State<'_, Arc<TunnelManager>>,
+    store: State<'_, Arc<dyn SecretStore>>,
+) -> Result<(), String> {
+    if manager.is_running(&profile_id).await {
+        return Err("Stop the tunnel for this profile before deleting it.".to_string());
+    }
+    let mut cfg = config::load_config()?;
+    let before = cfg.profiles.len();
+    cfg.profiles.retain(|p| p.id != profile_id);
+    if cfg.profiles.len() == before {
+        return Err(format!("Profile {profile_id} not found."));
+    }
+    if cfg.active_profile_id == Some(profile_id) {
+        cfg.active_profile_id = None;
+    }
+    config::save_config(&cfg)?;
+    // Best-effort: a failing keyring must not block the delete.
+    let _ = store.delete_secret(KEYRING_SERVICE, &config::profile_secret_user(profile_id));
     Ok(())
 }
 
+/// Import the legacy bore-tunnel-gui config as a new profile. Explicit
+/// only (the frontend offers it); NEVER starts a tunnel.
 #[tauri::command]
-pub async fn get_status(state: State<'_, TunnelState>) -> Result<TunnelStatus, String> {
-    let supervisor = state.lock().await;
-    Ok(supervisor.status())
+pub async fn import_legacy(
+    store: State<'_, Arc<dyn SecretStore>>,
+) -> Result<Option<Profile>, String> {
+    let legacy_dir = config::legacy_config_dir()?;
+    let Some(profile) = config::import_legacy(&legacy_dir, store.inner().as_ref())? else {
+        return Ok(None);
+    };
+    let mut cfg = config::load_config()?;
+    cfg.profiles.push(profile.clone());
+    if cfg.active_profile_id.is_none() {
+        cfg.active_profile_id = Some(profile.id);
+    }
+    config::save_config(&cfg)?;
+    Ok(Some(profile))
 }
 
 #[tauri::command]
-pub async fn copy_address(state: State<'_, TunnelState>) -> Result<String, String> {
-    let supervisor = state.lock().await;
-    let status = supervisor.status();
-    status
-        .remote_address
+pub async fn has_legacy_config() -> Result<bool, String> {
+    Ok(config::legacy_config_dir()?.join(CONFIG_FILE).exists())
+}
+
+// ---------------------------------------------------------------------
+// Tunnels
+// ---------------------------------------------------------------------
+
+/// Start the tunnel for a profile. `secret` (when non-empty) is stored
+/// best-effort and used; otherwise the stored secret ("" when none).
+#[tauri::command]
+pub async fn start_tunnel(
+    profile_id: uuid::Uuid,
+    secret: Option<String>,
+    manager: State<'_, Arc<TunnelManager>>,
+    store: State<'_, Arc<dyn SecretStore>>,
+) -> Result<TunnelStatus, String> {
+    let cfg = config::load_config()?;
+    let profile = cfg
+        .profiles
+        .iter()
+        .find(|p| p.id == profile_id)
+        .cloned()
+        .ok_or_else(|| format!("Profile {profile_id} not found."))?;
+
+    let user = config::profile_secret_user(profile_id);
+    let secret = match secret.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => {
+            let s = s.to_string();
+            // Remember it for next time, but never fail the start on it.
+            let _ = store.set_secret(KEYRING_SERVICE, &user, &s);
+            s
+        }
+        _ => store.get_secret(KEYRING_SERVICE, &user)?.unwrap_or_default(),
+    };
+
+    manager.start(profile, secret).await?;
+    manager
+        .wait_for(&profile_id, &["connected", "failed"], CONNECT_RESULT_WAIT)
+        .await
+        .ok_or_else(|| "Tunnel failed to start.".to_string())
+}
+
+/// `None` targets the active profile. Errors when there is neither an
+/// explicit id nor an active profile, or when the tunnel is unknown.
+#[tauri::command]
+pub async fn stop_tunnel(
+    profile_id: Option<uuid::Uuid>,
+    manager: State<'_, Arc<TunnelManager>>,
+) -> Result<(), String> {
+    let id = resolve_target(profile_id)?;
+    if !manager.stop(&id).await {
+        return Err("No tunnel is running for this profile.".to_string());
+    }
+    Ok(())
+}
+
+/// `None` targets the active profile. Unknown/never-started profiles
+/// report the idle default so the legacy UI can keep polling cleanly.
+#[tauri::command]
+pub async fn get_status(
+    profile_id: Option<uuid::Uuid>,
+    manager: State<'_, Arc<TunnelManager>>,
+) -> Result<TunnelStatus, String> {
+    let id = resolve_target(profile_id)?;
+    Ok(manager.status_of(&id).await.unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn get_all_status(
+    manager: State<'_, Arc<TunnelManager>>,
+) -> Result<Vec<ProfileStatus>, String> {
+    let cfg = config::load_config()?;
+    let mut out = Vec::with_capacity(cfg.profiles.len());
+    for profile in &cfg.profiles {
+        let status = manager.status_of(&profile.id).await.unwrap_or_default();
+        out.push(ProfileStatus {
+            profile_id: profile.id,
+            status,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn get_tunnel_log(
+    profile_id: uuid::Uuid,
+    since_index: Option<u64>,
+    manager: State<'_, Arc<TunnelManager>>,
+) -> Result<Vec<LogEntry>, String> {
+    manager
+        .logs_of(&profile_id, since_index)
+        .await
+        .ok_or_else(|| format!("No tunnel logs for profile {profile_id}."))
+}
+
+/// `None` targets the active profile.
+#[tauri::command]
+pub async fn copy_address(
+    profile_id: Option<uuid::Uuid>,
+    manager: State<'_, Arc<TunnelManager>>,
+) -> Result<String, String> {
+    let id = resolve_target(profile_id)?;
+    manager
+        .status_of(&id)
+        .await
+        .and_then(|s| s.remote_address)
         .ok_or_else(|| "No remote address available.".to_string())
 }
 
@@ -91,4 +235,146 @@ pub async fn open_config_folder() -> Result<(), String> {
     let dir = config::config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     open::that(&dir).map_err(|e| format!("Failed to open folder: {e}"))
+}
+
+// ---------------------------------------------------------------------
+// Local service detection
+// ---------------------------------------------------------------------
+
+/// Probe the well-known local ports on 127.0.0.1 (wizard step 2).
+#[tauri::command]
+pub async fn detect_local_service() -> Result<Vec<discover::DetectedService>, String> {
+    Ok(discover::detect_local_service().await)
+}
+
+// ---------------------------------------------------------------------
+// Pure helpers (unit-tested)
+// ---------------------------------------------------------------------
+
+/// Trim `name`/`server_host` and enforce the profile rules:
+/// non-empty name (≤ 64 chars, unique), non-empty host, non-zero
+/// server/local ports.
+fn normalize_profile(profile: Profile, others: &[Profile]) -> Result<Profile, String> {
+    let mut profile = profile;
+    profile.name = profile.name.trim().to_string();
+    profile.server_host = profile.server_host.trim().to_string();
+
+    if profile.name.is_empty() {
+        return Err("Profile name is required.".to_string());
+    }
+    if profile.name.chars().count() > 64 {
+        return Err("Profile name must be 64 characters or fewer.".to_string());
+    }
+    if others
+        .iter()
+        .any(|p| p.id != profile.id && p.name.eq_ignore_ascii_case(&profile.name))
+    {
+        return Err(format!("A profile named \"{}\" already exists.", profile.name));
+    }
+    if profile.server_host.is_empty() {
+        return Err("Server host is required.".to_string());
+    }
+    if profile.server_port == 0 {
+        return Err("Server port cannot be 0.".to_string());
+    }
+    if profile.local_port == 0 {
+        return Err("Local port cannot be 0.".to_string());
+    }
+    Ok(profile)
+}
+
+/// Resolve the command target: an explicit id wins; otherwise the active
+/// profile must exist (loaded from the real config).
+fn resolve_target(profile_id: Option<uuid::Uuid>) -> Result<uuid::Uuid, String> {
+    let active = config::load_config()?.active_profile_id;
+    resolve_target_with(profile_id, active)
+}
+
+/// Pure core of [`resolve_target`].
+fn resolve_target_with(
+    requested: Option<uuid::Uuid>,
+    active: Option<uuid::Uuid>,
+) -> Result<uuid::Uuid, String> {
+    match (requested, active) {
+        (Some(id), _) => Ok(id),
+        (None, Some(id)) => Ok(id),
+        (None, None) => Err("No active profile.".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn profile(name: &str, host: &str) -> Profile {
+        Profile {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            server_host: host.to_string(),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn normalize_trims_and_accepts_a_valid_profile() {
+        let p = normalize_profile(profile("  MC  ", "  bore.pub  "), &[]).unwrap();
+        assert_eq!(p.name, "MC");
+        assert_eq!(p.server_host, "bore.pub");
+    }
+
+    #[test]
+    fn normalize_rejects_bad_input_descriptively() {
+        let cases: [(Profile, &str); 5] = [
+            (profile("   ", "bore.pub"), "name is required"),
+            (profile(&"x".repeat(65), "bore.pub"), "64 characters"),
+            (profile("mc", ""), "Server host is required"),
+            (
+                Profile {
+                    server_port: 0,
+                    ..profile("mc", "bore.pub")
+                },
+                "Server port cannot be 0",
+            ),
+            (
+                Profile {
+                    local_port: 0,
+                    ..profile("mc", "bore.pub")
+                },
+                "Local port cannot be 0",
+            ),
+        ];
+        for (input, needle) in cases {
+            let err = normalize_profile(input, &[]).unwrap_err();
+            assert!(err.contains(needle), "expected \"{needle}\", got \"{err}\"");
+        }
+    }
+
+    #[test]
+    fn normalize_rejects_duplicate_names_but_allows_itself() {
+        let existing = profile("mc", "bore.pub");
+        let dup = Profile {
+            id: Uuid::new_v4(),
+            ..existing.clone()
+        };
+        assert!(normalize_profile(dup, std::slice::from_ref(&existing)).is_err());
+        // Same id (an edit keeping its name) is fine.
+        assert!(normalize_profile(existing.clone(), &[existing]).is_ok());
+    }
+
+    #[test]
+    fn resolve_target_prefers_the_explicit_id_then_the_active_profile() {
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        assert_eq!(resolve_target_with(Some(id), Some(other)).unwrap(), id);
+        assert_eq!(
+            resolve_target_with(None, Some(id)).unwrap(),
+            id,
+            "active profile must be used when no explicit id is given"
+        );
+        assert_eq!(
+            resolve_target_with(None, None).unwrap_err(),
+            "No active profile."
+        );
+    }
 }
