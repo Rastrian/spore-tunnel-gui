@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicehash/Tauri/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Bore Minecraft Tunnel",
+  "productName": "Spore Tunnel",
   "version": "1.0.0",
-  "identifier": "com.bore-minecraft-tunnel",
+  "identifier": "dev.rastrian.sporetunnel",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "Bore Minecraft Tunnel",
-        "width": 520,
-        "height": 720,
+        "title": "Spore Tunnel",
+        "width": 980,
+        "height": 680,
+        "minWidth": 860,
+        "minHeight": 600,
         "resizable": true,
         "center": true
       }

@@ -120,7 +120,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <h1>Bore Minecraft Tunnel</h1>
+      <h1>Spore Tunnel</h1>
 
       <section className="section">
         <label>
