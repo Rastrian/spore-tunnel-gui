@@ -342,6 +342,24 @@ pub fn parse_server_message(payload: &[u8]) -> Result<ServerMessage, ProtocolErr
     serde_json::from_slice(payload).map_err(|e| ProtocolError::MalformedJson(e.to_string()))
 }
 
+/// Computes the bore-compatible answer to a server challenge.
+///
+/// The HMAC key is `SHA256(secret)` and the message is the challenge
+/// nonce's 16 raw UUID bytes. If the nonce is not a parseable UUID, the
+/// nonce's string bytes are used instead. The result is lowercase hex.
+pub fn challenge_answer(secret: &str, nonce: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+
+    let key = Sha256::digest(secret.as_bytes());
+    let mut mac = <Hmac<Sha256>>::new_from_slice(&key).expect("HMAC-SHA256 accepts any key size");
+    match uuid::Uuid::parse_str(nonce) {
+        Ok(id) => mac.update(id.as_bytes()),
+        Err(_) => mac.update(nonce.as_bytes()),
+    }
+    hex::encode(mac.finalize().into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,5 +898,77 @@ mod tests {
 
         let err = ProtocolError::FrameTooLarge(MAX_FRAME_LEN + 1);
         assert!(matches!(TunnelError::from(err), TunnelError::Protocol(_)));
+    }
+
+    // --- challenge auth --------------------------------------------------
+
+    const AUTH_SECRET: &str = "hunter2";
+    const AUTH_NONCE: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[test]
+    fn challenge_answer_matches_independent_hmac_computation() {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let key = Sha256::digest(AUTH_SECRET.as_bytes());
+        let mut mac = <Hmac<Sha256>>::new_from_slice(&key).unwrap();
+        mac.update(uuid::Uuid::parse_str(AUTH_NONCE).unwrap().as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        let answer = challenge_answer(AUTH_SECRET, AUTH_NONCE);
+        assert_eq!(answer, expected);
+        assert_eq!(answer.len(), 64);
+        assert!(answer.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn challenge_answer_uses_uuid_raw_bytes_not_nonce_string() {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let key = Sha256::digest(AUTH_SECRET.as_bytes());
+        let mut mac = <Hmac<Sha256>>::new_from_slice(&key).unwrap();
+        mac.update(AUTH_NONCE.as_bytes());
+        let over_string = hex::encode(mac.finalize().into_bytes());
+
+        assert_ne!(challenge_answer(AUTH_SECRET, AUTH_NONCE), over_string);
+    }
+
+    #[test]
+    fn challenge_answer_is_stable() {
+        assert_eq!(
+            challenge_answer(AUTH_SECRET, AUTH_NONCE),
+            challenge_answer(AUTH_SECRET, AUTH_NONCE)
+        );
+        assert_ne!(
+            challenge_answer(AUTH_SECRET, AUTH_NONCE),
+            challenge_answer("other-secret", AUTH_NONCE)
+        );
+        assert_ne!(
+            challenge_answer(AUTH_SECRET, AUTH_NONCE),
+            challenge_answer(AUTH_SECRET, "550e8400-e29b-41d4-a716-446655449999")
+        );
+        // Hyphenated and compact spellings of the same UUID are the same
+        // 16 raw bytes, so they must produce the same answer.
+        assert_eq!(
+            challenge_answer(AUTH_SECRET, AUTH_NONCE),
+            challenge_answer(AUTH_SECRET, "550e8400e29b41d4a716446655440000")
+        );
+    }
+
+    #[test]
+    fn challenge_answer_falls_back_to_string_bytes_for_non_uuid_nonce() {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let nonce = "not-a-uuid";
+        assert!(uuid::Uuid::parse_str(nonce).is_err());
+
+        let key = Sha256::digest(AUTH_SECRET.as_bytes());
+        let mut mac = <Hmac<Sha256>>::new_from_slice(&key).unwrap();
+        mac.update(nonce.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        assert_eq!(challenge_answer(AUTH_SECRET, nonce), expected);
     }
 }
