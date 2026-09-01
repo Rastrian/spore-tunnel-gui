@@ -35,6 +35,7 @@ pub fn run() {
             commands::get_tunnel_log,
             commands::copy_address,
             commands::open_config_folder,
+            commands::detect_local_service,
         ])
         .run(tauri::generate_context!());
 

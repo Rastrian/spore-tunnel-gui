@@ -2,6 +2,7 @@
 //! (manager), mapping the old single-tunnel UI onto the ACTIVE profile.
 
 use spore_tunnel_gui::config::{self, Profile, SecretStore, CONFIG_FILE, KEYRING_SERVICE};
+use spore_tunnel_gui::discover;
 use spore_tunnel_gui::tunnel::events::LogEntry;
 use spore_tunnel_gui::tunnel::manager::TunnelManager;
 use spore_tunnel_gui::tunnel::supervisor::TunnelStatus;
@@ -234,6 +235,16 @@ pub async fn open_config_folder() -> Result<(), String> {
     let dir = config::config_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create config dir: {e}"))?;
     open::that(&dir).map_err(|e| format!("Failed to open folder: {e}"))
+}
+
+// ---------------------------------------------------------------------
+// Local service detection
+// ---------------------------------------------------------------------
+
+/// Probe the well-known local ports on 127.0.0.1 (wizard step 2).
+#[tauri::command]
+pub async fn detect_local_service() -> Result<Vec<discover::DetectedService>, String> {
+    Ok(discover::detect_local_service().await)
 }
 
 // ---------------------------------------------------------------------

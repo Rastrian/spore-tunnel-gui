@@ -2,7 +2,7 @@
 // argument keys to the snake_case Rust parameters.
 
 import { invoke } from "@tauri-apps/api/core";
-import type { LogEntry, Profile, ProfileStatus, TunnelStatus } from "./types";
+import type { DetectedService, LogEntry, Profile, ProfileStatus, TunnelStatus } from "./types";
 
 export function listProfiles(): Promise<Profile[]> {
   return invoke<Profile[]>("list_profiles");
@@ -59,4 +59,8 @@ export function copyAddress(profileId?: string): Promise<string> {
 
 export function openConfigFolder(): Promise<void> {
   return invoke("open_config_folder");
+}
+
+export function detectLocalService(): Promise<DetectedService[]> {
+  return invoke<DetectedService[]>("detect_local_service");
 }
