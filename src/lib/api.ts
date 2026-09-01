@@ -1,38 +1,62 @@
+// Typed wrappers for every Tauri command. Tauri v2 maps camelCase JS
+// argument keys to the snake_case Rust parameters.
+
 import { invoke } from "@tauri-apps/api/core";
-import type { AppConfig, TunnelStatus } from "./types";
+import type { LogEntry, Profile, ProfileStatus, TunnelStatus } from "./types";
 
-export async function loadConfig(): Promise<AppConfig> {
-  return invoke<AppConfig>("load_config_cmd");
+export function listProfiles(): Promise<Profile[]> {
+  return invoke<Profile[]>("list_profiles");
 }
 
-export async function saveConfig(config: AppConfig): Promise<void> {
-  return invoke("save_config_cmd", { config });
+export function saveProfile(profile: Profile): Promise<Profile> {
+  return invoke<Profile>("save_profile", { profile });
 }
 
-export async function saveSecret(secret: string): Promise<void> {
-  return invoke("save_secret_cmd", { secret });
+export function setActiveProfile(profileId: string): Promise<void> {
+  return invoke("set_active_profile", { profileId });
 }
 
-export async function hasSecret(): Promise<boolean> {
-  return invoke<boolean>("has_secret_cmd");
+export function setProfileSecret(profileId: string, secret: string): Promise<void> {
+  return invoke("set_profile_secret", { profileId, secret });
 }
 
-export async function startTunnel(config: AppConfig, secret: string): Promise<TunnelStatus> {
-  return invoke<TunnelStatus>("start_tunnel", { config, secret });
+export function deleteProfile(profileId: string): Promise<void> {
+  return invoke("delete_profile", { profileId });
 }
 
-export async function stopTunnel(): Promise<void> {
-  return invoke("stop_tunnel");
+export function importLegacy(): Promise<Profile | null> {
+  return invoke<Profile | null>("import_legacy");
 }
 
-export async function getStatus(): Promise<TunnelStatus> {
-  return invoke<TunnelStatus>("get_status");
+export function hasLegacyConfig(): Promise<boolean> {
+  return invoke<boolean>("has_legacy_config");
 }
 
-export async function copyAddress(): Promise<string> {
-  return invoke<string>("copy_address");
+export function startTunnel(profileId: string, secret?: string): Promise<TunnelStatus> {
+  return invoke<TunnelStatus>("start_tunnel", { profileId, secret });
 }
 
-export async function openConfigFolder(): Promise<void> {
+/** Omit `profileId` to target the active profile. */
+export function stopTunnel(profileId?: string): Promise<void> {
+  return invoke("stop_tunnel", { profileId });
+}
+
+export function getStatus(profileId?: string): Promise<TunnelStatus> {
+  return invoke<TunnelStatus>("get_status", { profileId });
+}
+
+export function getAllStatus(): Promise<ProfileStatus[]> {
+  return invoke<ProfileStatus[]>("get_all_status");
+}
+
+export function getTunnelLog(profileId: string, sinceIndex?: number): Promise<LogEntry[]> {
+  return invoke<LogEntry[]>("get_tunnel_log", { profileId, sinceIndex });
+}
+
+export function copyAddress(profileId?: string): Promise<string> {
+  return invoke<string>("copy_address", { profileId });
+}
+
+export function openConfigFolder(): Promise<void> {
   return invoke("open_config_folder");
 }
