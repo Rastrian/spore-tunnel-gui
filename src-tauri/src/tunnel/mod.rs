@@ -1,0 +1,17 @@
+//! Spore Tunnel protocol core.
+//!
+//! - [`protocol`]: wire framing and message codecs.
+//! - [`client`]: control-channel client with dialect negotiation.
+//! - [`forward`]: per-connection data forwarder.
+//! - [`supervisor`]: owns the control loop, forwarders, reconnects, status.
+
+pub mod client;
+pub mod error;
+pub mod forward;
+pub mod protocol;
+pub mod supervisor;
+
+#[cfg(test)]
+pub mod mock_server;
+
+pub use error::TunnelError;
