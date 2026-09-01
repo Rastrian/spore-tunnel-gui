@@ -1,7 +1,7 @@
 //! Tauri command surface: profiles (config + keyring) and tunnels
 //! (manager), mapping the old single-tunnel UI onto the ACTIVE profile.
 
-use spore_tunnel_gui::config::{self, Profile, SecretStore, CONFIG_FILE, KEYRING_SERVICE};
+use spore_tunnel_gui::config::{self, Profile, SecretStore, UiPrefs, CONFIG_FILE, KEYRING_SERVICE};
 use spore_tunnel_gui::discover;
 use spore_tunnel_gui::tunnel::events::LogEntry;
 use spore_tunnel_gui::tunnel::manager::TunnelManager;
@@ -137,6 +137,19 @@ pub async fn start_tunnel(
     manager: State<'_, Arc<TunnelManager>>,
     store: State<'_, Arc<dyn SecretStore>>,
 ) -> Result<TunnelStatus, String> {
+    start_profile(profile_id, secret, manager.inner(), store.inner()).await
+}
+
+/// Body of [`start_tunnel`], shared with the tray's `start:<uuid>` menu
+/// item so both paths behave identically. Resolves the profile from the
+/// config, resolves its secret (argument > keyring > empty) and starts
+/// it, then waits briefly for the first connect attempt to settle.
+pub(crate) async fn start_profile(
+    profile_id: uuid::Uuid,
+    secret: Option<String>,
+    manager: &Arc<TunnelManager>,
+    store: &Arc<dyn SecretStore>,
+) -> Result<TunnelStatus, String> {
     let cfg = config::load_config()?;
     let profile = cfg
         .profiles
@@ -248,6 +261,28 @@ pub async fn detect_local_service() -> Result<Vec<discover::DetectedService>, St
 }
 
 // ---------------------------------------------------------------------
+// UI preferences
+// ---------------------------------------------------------------------
+
+/// Current window/tray behavior prefs. Read once at startup (theme,
+/// start-minimized) and whenever the settings view is opened.
+#[tauri::command]
+pub async fn get_ui_prefs() -> Result<UiPrefs, String> {
+    Ok(config::load_config()?.ui)
+}
+
+/// Replace the prefs wholesale. Taking `UiPrefs` as the arg type means
+/// serde validates it for free — an unknown `theme` string never reaches
+/// this body, it fails the invoke instead.
+#[tauri::command]
+pub async fn update_ui_prefs(prefs: UiPrefs) -> Result<UiPrefs, String> {
+    let mut cfg = config::load_config()?;
+    apply_ui_prefs(&mut cfg, prefs);
+    config::save_config(&cfg)?;
+    Ok(cfg.ui)
+}
+
+// ---------------------------------------------------------------------
 // Pure helpers (unit-tested)
 // ---------------------------------------------------------------------
 
@@ -302,9 +337,16 @@ fn resolve_target_with(
     }
 }
 
+/// Pure core of [`update_ui_prefs`]: swap the config's `ui` section for
+/// the given prefs (the command then persists and returns them).
+fn apply_ui_prefs(config: &mut config::AppConfig, prefs: UiPrefs) {
+    config.ui = prefs;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use spore_tunnel_gui::config::Theme;
     use uuid::Uuid;
 
     fn profile(name: &str, host: &str) -> Profile {
@@ -376,5 +418,82 @@ mod tests {
             resolve_target_with(None, None).unwrap_err(),
             "No active profile."
         );
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        tempfile::tempdir().unwrap().keep()
+    }
+
+    #[test]
+    fn ui_prefs_apply_and_roundtrip_through_save_load() {
+        let dir = temp_dir();
+        let path = dir.join(CONFIG_FILE);
+        let prefs = UiPrefs {
+            theme: Theme::Dark,
+            start_minimized: true,
+            close_to_tray: false,
+        };
+
+        let mut cfg = config::AppConfig::default();
+        apply_ui_prefs(&mut cfg, prefs);
+        assert_eq!(cfg.ui, prefs, "apply must replace the ui section");
+        cfg.save_to(&path).unwrap();
+
+        // camelCase + lowercase theme in the stored JSON.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"theme\": \"dark\""));
+        assert!(raw.contains("\"startMinimized\": true"));
+        assert!(raw.contains("\"closeToTray\": false"));
+
+        let loaded = config::AppConfig::load_from(&path).unwrap();
+        assert_eq!(loaded.ui, prefs);
+    }
+
+    #[test]
+    fn ui_prefs_theme_variants_roundtrip() {
+        let dir = temp_dir();
+        let path = dir.join(CONFIG_FILE);
+        for (theme, wire) in
+            [(Theme::Dark, "dark"), (Theme::Light, "light"), (Theme::System, "system")]
+        {
+            let prefs = UiPrefs {
+                theme,
+                ..UiPrefs::default()
+            };
+            // Wire shape: camelCase keys, lowercase theme — exactly what
+            // the frontend sends and `get_ui_prefs` returns.
+            assert_eq!(
+                serde_json::to_value(prefs).unwrap(),
+                serde_json::json!({
+                    "theme": wire,
+                    "startMinimized": false,
+                    "closeToTray": true,
+                })
+            );
+
+            let mut cfg = config::AppConfig::default();
+            apply_ui_prefs(&mut cfg, prefs);
+            cfg.save_to(&path).unwrap();
+            assert_eq!(
+                config::AppConfig::load_from(&path).unwrap().ui,
+                prefs,
+                "{wire:?} must survive a save/load cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn ui_prefs_reject_unknown_theme() {
+        // This is the validation the invoke gets for free via the arg type.
+        assert!(serde_json::from_str::<UiPrefs>(r#"{"theme": "blue"}"#).is_err());
+        // ...and every valid theme string deserializes.
+        for wire in ["dark", "light", "system"] {
+            let json = format!(r#"{{"theme": "{wire}"}}"#);
+            let prefs: UiPrefs = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_value(prefs.theme).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
     }
 }

@@ -237,10 +237,27 @@ Profile fields: see `Profile` above.
 | `copy_address`          | `profileId?: string`                   | `string` (public `host:port`; rejects when not connected) |
 | `open_config_folder`    | —                                      | `void`                         |
 | `detect_local_service`  | —                                      | `DetectedService[]` (see `src-tauri/src/discover.rs`) |
+| `get_ui_prefs`          | —                                      | `UiPrefs`                      |
+| `update_ui_prefs`      | `prefs: UiPrefs`                       | `UiPrefs` (persisted)          |
 
 Secrets never appear in profile objects or config files — they are written
 through `set_profile_secret` (or the `start_tunnel` argument) into the OS
 keyring only.
+
+`UiPrefs` (defined in `src-tauri/src/config.rs`; shape mirrored in the
+frontend types) covers window/tray behavior:
+
+```ts
+interface UiPrefs {
+  theme: "dark" | "light" | "system";
+  startMinimized: boolean;
+  closeToTray: boolean;
+}
+```
+
+An unknown `theme` string fails deserialization of the `prefs` argument, so
+`update_ui_prefs` rejects it with an invoke error instead of persisting
+garbage.
 
 ---
 
@@ -253,7 +270,14 @@ hydration calls (Phase 3 expands this, the shape stays).
 import { create } from "zustand";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { LogEntry, LogEvent, StatsEvent, StatusEvent, TunnelStatus } from "./types";
+import type {
+  LogEntry,
+  LogEvent,
+  ProfileStatus,
+  StatsEvent,
+  StatusEvent,
+  TunnelStatus,
+} from "./types";
 
 interface TunnelStore {
   statuses: Record<string, TunnelStatus>;
@@ -305,19 +329,22 @@ export async function initTunnelEvents(): Promise<UnlistenFn[]> {
   });
 
   // One-shot hydration AFTER subscribing, so no event is missed.
-  const all = await invoke<Record<string, TunnelStatus>>("get_all_status");
-  for (const [profileId, status] of Object.entries(all)) {
+  // `get_all_status` returns an ARRAY of { profileId, status } — see the
+  // command reference below. `mergeRuns` composes the backfill with the
+  // entries live events already buffered (strictly-greater index rule) —
+  // the shipped implementation is `mergeLogRuns` in `src/store/reducers.ts`.
+  const all = await invoke<ProfileStatus[]>("get_all_status");
+  for (const { profileId, status } of all) {
     const buffered = useTunnels.getState().logs[profileId] ?? [];
-    const last = buffered.at(-1)?.index ?? null;
     const entries = await invoke<LogEntry[]>("get_tunnel_log", {
       profileId,
-      sinceIndex: last,
+      sinceIndex: null, // full backfill; live events already buffered
     });
     useTunnels.setState((s) => ({
       statuses: { ...s.statuses, [profileId]: status },
       logs: {
         ...s.logs,
-        [profileId]: last === null ? entries : [...buffered, ...entries].slice(-MAX_CLIENT_LINES),
+        [profileId]: mergeRuns(entries, buffered).slice(-MAX_CLIENT_LINES),
       },
     }));
   }

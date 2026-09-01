@@ -1,5 +1,6 @@
 // camelCase mirrors of the Rust types in src-tauri/src (config.rs,
-// tunnel/supervisor.rs, tunnel/events.rs, commands.rs). Keep in sync.
+// tunnel/supervisor.rs, tunnel/events.rs, commands.rs). Keep in sync with
+// docs/EVENTS.md — the frozen event/command contract.
 
 export type Theme = "dark" | "light" | "system";
 
@@ -22,12 +23,6 @@ export interface UiPrefs {
   closeToTray: boolean;
 }
 
-export interface AppConfig {
-  profiles: Profile[];
-  activeProfileId?: string;
-  ui: UiPrefs;
-}
-
 export type TunnelState =
   | "idle"
   | "starting"
@@ -35,28 +30,62 @@ export type TunnelState =
   | "failed"
   | "stopped";
 
+export type ServerKind = "Bore" | "Spore";
+export type LogLevel = "info" | "error";
+
 export interface TunnelStatus {
   state: TunnelState;
-  /** "Bore" | "Spore" once the handshake identified the server. */
-  serverKind?: string;
+  /** Dialect the handshake identified; null until the first connect. */
+  serverKind: ServerKind | null;
+  /** The local service being exposed, `host:port`. */
   localAddress: string;
-  remoteAddress?: string;
-  assignedRemotePort?: number;
-  uptimeSecs?: number;
-  bytesUp?: number;
-  bytesDown?: number;
-  reconnects?: number;
-  lastError?: string;
+  /** Public `host:port`; null while not connected. May change after a reconnect. */
+  remoteAddress: string | null;
+  assignedRemotePort: number | null;
+  uptimeSecs: number;
+  bytesUp: number;
+  bytesDown: number;
+  reconnects: number;
+  lastError: string | null;
+  /**
+   * Convenience snapshot only — the live stream is the `tunnel://log`
+   * event. Do not render from this array.
+   */
   logs: string[];
 }
 
+export interface StatusEvent {
+  profileId: string;
+  /** Full snapshot — replace any previous copy wholesale. */
+  status: TunnelStatus;
+}
+
+export interface LogEvent {
+  profileId: string;
+  /** Strictly increasing within a run; resets to 0 on `start_tunnel`. */
+  index: number;
+  line: string;
+  level: LogLevel;
+  /** Unix epoch milliseconds. */
+  ts: number;
+}
+
+export interface StatsEvent {
+  profileId: string;
+  bytesUp: number;
+  bytesDown: number;
+  uptimeSecs: number;
+}
+
+/** Backfill entry shape returned by `get_tunnel_log`. */
 export interface LogEntry {
   index: number;
   ts: number;
-  level: "info" | "error";
+  level: LogLevel;
   line: string;
 }
 
+/** One entry of `get_all_status` (an array, not a record). */
 export interface ProfileStatus {
   profileId: string;
   status: TunnelStatus;
