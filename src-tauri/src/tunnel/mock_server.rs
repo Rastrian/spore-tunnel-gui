@@ -20,7 +20,7 @@ use super::protocol::{
     ClientMessage, FrameDecoder, FrameReader, ServerMessage,
 };
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -54,7 +54,7 @@ struct Shared {
     require_auth: bool,
     ack_interval: Option<Duration>,
     drop_on_hello_ex: bool,
-    assigned_port: u16,
+    assigned_port: AtomicU16,
     hellos: AtomicUsize,
     hello_exes: AtomicUsize,
     accepts: AtomicUsize,
@@ -140,7 +140,7 @@ impl MockServerBuilder {
             require_auth: self.require_auth,
             ack_interval: self.ack_interval,
             drop_on_hello_ex: self.drop_on_hello_ex,
-            assigned_port: echo_addr.port(),
+            assigned_port: AtomicU16::new(echo_addr.port()),
             hellos: AtomicUsize::new(0),
             hello_exes: AtomicUsize::new(0),
             accepts: AtomicUsize::new(0),
@@ -170,9 +170,18 @@ impl MockServer {
         self.echo_addr
     }
 
-    /// Port the mock hands back as the tunnel's assigned remote port.
+    /// Port the mock hands back as the tunnel's assigned remote port
+    /// (changes after [`MockServer::set_assigned_port`]; the echo
+    /// listener stays on the port it was bound to).
     pub fn assigned_port(&self) -> u16 {
-        self.echo_addr.port()
+        self.shared.assigned_port.load(Ordering::Relaxed)
+    }
+
+    /// Change the port advertised in future handshakes — used with
+    /// [`MockServer::drop_control`] to simulate a server restart that
+    /// reassigns tunnels to different ports.
+    pub fn set_assigned_port(&self, port: u16) {
+        self.shared.assigned_port.store(port, Ordering::Relaxed);
     }
 
     pub fn hello_count(&self) -> usize {
@@ -302,9 +311,12 @@ async fn handle_conn(
             shared.hellos.fetch_add(1, Ordering::Relaxed);
             match shared.dialect {
                 Dialect::Bore => {
-                    if send(&mut wh, &ServerMessage::Hello(shared.assigned_port))
-                        .await
-                        .is_err()
+                    if send(
+                        &mut wh,
+                        &ServerMessage::Hello(shared.assigned_port.load(Ordering::Relaxed)),
+                    )
+                    .await
+                    .is_err()
                     {
                         return;
                     }
@@ -329,7 +341,7 @@ async fn handle_conn(
                 }
                 Dialect::Spore => {
                     let reply = ServerMessage::HelloEx {
-                        port: shared.assigned_port,
+                        port: shared.assigned_port.load(Ordering::Relaxed),
                         features: vec!["ack".to_string()],
                     };
                     if send(&mut wh, &reply).await.is_err() {
