@@ -1,8 +1,18 @@
+# Spore Tunnel CI/CD
+#
+# - PRs and pushes to main: test + build, upload installer artifact.
+# - Tag push (v*): same build, then PUBLISH a GitHub Release with the NSIS
+#   installer + SHA256SUMS.txt (consumed by the in-app update checker).
+#
+# Releases are tag-driven only. To cut one:
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+
 name: Build Spore Tunnel
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -33,6 +43,12 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Frontend unit tests
+        run: npm test -- --run
+
+      # Non-tag builds: builds the app and uploads nothing to releases
+      # (releaseId output stays empty). Tag builds: uploads the NSIS
+      # installer to a DRAFT release named after the tag.
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -40,13 +56,38 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Spore Tunnel v__VERSION__"
-          releaseBody: "Windows installer for Spore Tunnel. No external dependencies needed - the Bore/Spore tunnel protocol is implemented natively."
+          releaseBody: "Windows installer for Spore Tunnel. The Bore/Spore tunnel protocol is implemented natively - no external binaries needed."
           releaseDraft: true
           prerelease: false
 
+      - name: Generate SHA256SUMS.txt
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          $dir = "src-tauri/target/release/bundle/nsis"
+          $files = Get-ChildItem "$dir/*.exe" | Select-Object -ExpandProperty Name
+          $lines = foreach ($name in $files) {
+            $hash = (Get-FileHash "$dir/$name" -Algorithm SHA256).Hash.ToLower()
+            "$hash  $name"
+          }
+          $lines -join "`n" | Out-File -Encoding ascii "$dir/SHA256SUMS.txt"
+          Get-Content "$dir/SHA256SUMS.txt"
+
+      - name: Attach checksums and publish release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release upload "$tag" "src-tauri/target/release/bundle/nsis/SHA256SUMS.txt" --clobber
+          gh release edit "$tag" --draft=false
+          gh release view "$tag"
+
       - name: Upload installer artifact
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-installer-${{ github.sha }}
           path: src-tauri/target/release/bundle/nsis/*.exe
           retention-days: 30
