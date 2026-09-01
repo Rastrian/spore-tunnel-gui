@@ -1,4 +1,4 @@
-use crate::config::{self, AppConfig};
+use spore_tunnel_gui::config::{self, AppConfig, Profile};
 use spore_tunnel_gui::tunnel::client::TunnelConfig;
 use spore_tunnel_gui::tunnel::supervisor::{SupervisorConfig, TunnelStatus, TunnelSupervisor};
 use std::sync::Arc;
@@ -12,6 +12,17 @@ pub type TunnelState = Arc<Mutex<TunnelSupervisor>>;
 /// before returning the (still starting) status.
 const CONNECT_RESULT_WAIT: Duration = Duration::from_secs(3);
 
+/// The profile the single-tunnel UI acts on: the configured active one,
+/// else the first profile.
+fn active_profile(cfg: &AppConfig) -> Result<Profile, String> {
+    cfg.profiles
+        .iter()
+        .find(|p| Some(p.id) == cfg.active_profile_id)
+        .or_else(|| cfg.profiles.first())
+        .cloned()
+        .ok_or_else(|| "No profile configured.".to_string())
+}
+
 #[tauri::command]
 pub async fn load_config_cmd() -> Result<AppConfig, String> {
     config::load_config()
@@ -23,38 +34,25 @@ pub async fn save_config_cmd(config: AppConfig) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn save_secret_cmd(secret: String) -> Result<(), String> {
-    config::save_secret(secret.trim())
-}
-
-#[tauri::command]
-pub async fn has_secret_cmd() -> Result<bool, String> {
-    Ok(config::has_secret())
-}
-
-#[tauri::command]
 pub async fn start_tunnel(
     state: State<'_, TunnelState>,
     config: AppConfig,
     secret: String,
 ) -> Result<TunnelStatus, String> {
+    let profile = active_profile(&config)?;
     let secret = secret.trim().to_string();
 
-    // Try to save to keyring for next time (best-effort, don't fail if it doesn't work)
-    if !secret.is_empty() {
-        let _ = config::save_secret(&secret);
-    }
-
-    let supervisor_config = SupervisorConfig::new(
+    let mut supervisor_config = SupervisorConfig::new(
         TunnelConfig {
-            server: config.bore_server_host.clone(),
-            control_port: config.bore_server_port.unwrap_or(7835),
-            remote_port: config.remote_port,
+            server: profile.server_host.clone(),
+            control_port: profile.server_port,
+            remote_port: profile.remote_port,
         },
         secret,
-        config.local_host.clone(),
-        config.local_port,
+        profile.local_host.clone(),
+        profile.local_port,
     );
+    supervisor_config.auto_reconnect = profile.auto_reconnect;
 
     let supervisor = state.lock().await;
     supervisor.start(supervisor_config).await?;

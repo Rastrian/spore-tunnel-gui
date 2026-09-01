@@ -2,9 +2,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
-mod config;
 
 use commands::TunnelState;
+use spore_tunnel_gui::config;
 use spore_tunnel_gui::tunnel::supervisor::TunnelSupervisor;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -18,8 +18,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::load_config_cmd,
             commands::save_config_cmd,
-            commands::save_secret_cmd,
-            commands::has_secret_cmd,
             commands::start_tunnel,
             commands::stop_tunnel,
             commands::get_status,
