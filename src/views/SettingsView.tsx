@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { FolderOpen, Import, Monitor, Moon, RefreshCw, Sun } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { checkForUpdates, importLegacy, openConfigFolder } from "../lib/api";
 import {
   defaultStorage,
@@ -39,6 +44,31 @@ export function SettingsView() {
   const [lastChecked, setLastChecked] = useState<number | null>(() =>
     readLastChecked(defaultStorage()),
   );
+  // OS launch entry is the source of truth (no config mirror to drift).
+  const [autostart, setAutostart] = useState(false);
+
+  useEffect(() => {
+    autostartIsEnabled()
+      .then(setAutostart)
+      .catch((err: unknown) => console.error("autostart isEnabled failed", err));
+  }, []);
+
+  /** Optimistic toggle; re-reads the OS state so a failed write reverts. */
+  async function setAutostartEnabled(enabled: boolean) {
+    const previous = autostart;
+    setAutostart(enabled);
+    try {
+      if (enabled) {
+        await enableAutostart();
+      } else {
+        await disableAutostart();
+      }
+      setAutostart(await autostartIsEnabled());
+    } catch (err) {
+      setAutostart(previous);
+      showToast(String(err));
+    }
+  }
 
   async function doUpdateCheck() {
     setUpdateBusy(true);
@@ -129,6 +159,12 @@ export function SettingsView() {
 
       {/* Behavior */}
       <Section title="Behavior">
+        <Toggle
+          checked={autostart}
+          onChange={(enabled) => void setAutostartEnabled(enabled)}
+          label="Start Spore Tunnel at login"
+          description="Launch the app when you sign in; profiles set to “Start with the app” connect automatically"
+        />
         <Toggle
           checked={prefs?.startMinimized ?? false}
           onChange={(startMinimized) =>
