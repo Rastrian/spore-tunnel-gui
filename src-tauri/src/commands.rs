@@ -160,15 +160,7 @@ pub(crate) async fn start_profile(
         .ok_or_else(|| format!("Profile {profile_id} not found."))?;
 
     let user = config::profile_secret_user(profile_id);
-    let secret = match secret.as_deref().map(str::trim) {
-        Some(s) if !s.is_empty() => {
-            let s = s.to_string();
-            // Remember it for next time, but never fail the start on it.
-            let _ = store.set_secret(KEYRING_SERVICE, &user, &s);
-            s
-        }
-        _ => store.get_secret(KEYRING_SERVICE, &user)?.unwrap_or_default(),
-    };
+    let secret = resolve_secret(store, &user, secret);
 
     manager.start(profile, secret).await?;
     manager
@@ -352,6 +344,34 @@ fn resolve_target_with(
     }
 }
 
+/// Resolve a profile's start secret: a non-empty `provided` value wins
+/// (trimmed, remembered best-effort); otherwise the stored one. A keyring
+/// backend error (no secret-service daemon, missing DBus, ...) must NOT
+/// fail the start — even profiles with no secret deserve to start — so it
+/// degrades to "" with a warning.
+fn resolve_secret(
+    store: &Arc<dyn SecretStore>,
+    user: &str,
+    provided: Option<String>,
+) -> String {
+    match provided.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => {
+            let s = s.to_string();
+            // Remember it for next time, but never fail the start on it.
+            let _ = store.set_secret(KEYRING_SERVICE, user, &s);
+            s
+        }
+        _ => match store.get_secret(KEYRING_SERVICE, user) {
+            Ok(Some(s)) => s,
+            Ok(None) => String::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "keyring unavailable; proceeding without stored secret");
+                String::new()
+            }
+        },
+    }
+}
+
 /// Pure core of [`update_ui_prefs`]: swap the config's `ui` section for
 /// the given prefs (the command then persists and returns them).
 fn apply_ui_prefs(config: &mut config::AppConfig, prefs: UiPrefs) {
@@ -361,7 +381,7 @@ fn apply_ui_prefs(config: &mut config::AppConfig, prefs: UiPrefs) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spore_tunnel_gui::config::Theme;
+    use spore_tunnel_gui::config::{MemorySecretStore, Theme};
     use uuid::Uuid;
 
     fn profile(name: &str, host: &str) -> Profile {
@@ -432,6 +452,55 @@ mod tests {
         assert_eq!(
             resolve_target_with(None, None).unwrap_err(),
             "No active profile."
+        );
+    }
+
+    /// `SecretStore` stub simulating an unusable keyring backend (e.g. no
+    /// secret-service daemon on Linux, missing DBus): every call errors.
+    struct FailingSecretStore;
+
+    impl SecretStore for FailingSecretStore {
+        fn set_secret(&self, _s: &str, _u: &str, _secret: &str) -> Result<(), String> {
+            Err("Failed to save secret: no secret-service".to_string())
+        }
+        fn get_secret(&self, _s: &str, _u: &str) -> Result<Option<String>, String> {
+            Err("Failed to read secret: no secret-service".to_string())
+        }
+        fn delete_secret(&self, _s: &str, _u: &str) -> Result<(), String> {
+            Err("Failed to delete secret: no secret-service".to_string())
+        }
+    }
+
+    #[test]
+    fn resolve_secret_returns_empty_when_keyring_backend_fails() {
+        let store: Arc<dyn SecretStore> = Arc::new(FailingSecretStore);
+        // A broken backend must degrade to "" (never panic, never propagate)
+        // so profile starts are not killed by the keyring being unavailable.
+        assert_eq!(resolve_secret(&store, "profile:x", None), "");
+        // Blank/whitespace-only provided values take the same path.
+        assert_eq!(resolve_secret(&store, "profile:x", Some("   ".into())), "");
+    }
+
+    #[test]
+    fn resolve_secret_prefers_provided_then_stored() {
+        let store: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::new());
+        let user = "profile:abc";
+
+        // Nothing provided, nothing stored -> empty.
+        assert_eq!(resolve_secret(&store, user, None), "");
+        // Nothing provided -> the stored secret.
+        store.set_secret(KEYRING_SERVICE, user, "s3cret").unwrap();
+        assert_eq!(resolve_secret(&store, user, None), "s3cret");
+        // Blank provided falls through to the stored secret.
+        assert_eq!(resolve_secret(&store, user, Some("  ".into())), "s3cret");
+        // Non-empty provided wins, is trimmed and remembered best-effort.
+        assert_eq!(
+            resolve_secret(&store, user, Some("  hunter2  ".into())),
+            "hunter2"
+        );
+        assert_eq!(
+            store.get_secret(KEYRING_SERVICE, user).unwrap(),
+            Some("hunter2".to_string())
         );
     }
 
