@@ -65,7 +65,13 @@ jobs:
         shell: pwsh
         run: |
           $dir = "src-tauri/target/release/bundle/nsis"
-          $files = Get-ChildItem "$dir/*.exe" | Select-Object -ExpandProperty Name
+          # Guard against stale bundle artifacts restored by the Rust cache:
+          # keep only installers matching the current product name.
+          Get-ChildItem "$dir/*.exe" |
+            Where-Object { $_.Name -notlike "Spore.Tunnel_*" } |
+            Remove-Item -Force
+          $files = Get-ChildItem "$dir/Spore.Tunnel_*.exe" | Select-Object -ExpandProperty Name
+          if (-not $files) { Write-Error "no Spore.Tunnel_* installer found"; exit 1 }
           $lines = foreach ($name in $files) {
             $hash = (Get-FileHash "$dir/$name" -Algorithm SHA256).Hash.ToLower()
             "$hash  $name"
