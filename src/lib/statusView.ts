@@ -32,6 +32,15 @@ export const STATE_STROKE: Record<TunnelState, string> = {
   stopped: "stroke-dim",
 };
 
+/** Very short label that fits inside the status ring. */
+export const STATE_BADGE: Record<TunnelState, string> = {
+  idle: "IDLE",
+  starting: "CONN",
+  connected: "LIVE",
+  failed: "FAIL",
+  stopped: "STOP",
+};
+
 export function stateLabel(state: TunnelState): string {
   switch (state) {
     case "starting":
