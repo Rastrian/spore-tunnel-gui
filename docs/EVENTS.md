@@ -177,6 +177,12 @@ export interface Profile {
   autostart: boolean;
   autoReconnect: boolean;
 }
+
+/** One entry of `get_all_status`: a configured profile plus its tunnel. */
+export interface ProfileStatus {
+  profileId: string;
+  status: TunnelStatus; // idle-shaped when the tunnel was never started
+}
 ```
 
 ---
@@ -218,15 +224,15 @@ Profile fields: see `Profile` above.
 |-------------------------|----------------------------------------|--------------------------------|
 | `list_profiles`         | —                                      | `Profile[]`                    |
 | `save_profile`          | `profile: Profile`                     | `Profile` (id filled on create)|
-| `set_active_profile`    | `profileId: string \| null`            | `void`                         |
+| `set_active_profile`    | `profileId: string`                    | `void` (must exist)            |
 | `set_profile_secret`    | `profileId: string`, `secret: string`  | `void` (OS keyring, `profile:<id>`) |
 | `delete_profile`        | `profileId: string`                    | `void` (drops its keyring secret too) |
 | `import_legacy`         | —                                      | `Profile \| null` (`null` = nothing to import) |
 | `has_legacy_config`     | —                                      | `boolean`                      |
 | `start_tunnel`          | `profileId: string`, `secret?: string` | `TunnelStatus` (initial, usually `"starting"`) |
-| `stop_tunnel`           | `profileId?: string`                   | `void` (omitted = stop all)    |
+| `stop_tunnel`           | `profileId?: string`                   | `void` (omitted = active profile; use per-profile calls to stop several) |
 | `get_status`            | `profileId?: string`                   | `TunnelStatus` (active profile when omitted; idle-shaped before first start) |
-| `get_all_status`        | —                                      | `Record<profileId, TunnelStatus>` |
+| `get_all_status`        | —                                      | `ProfileStatus[]` (every configured profile) |
 | `get_tunnel_log`        | `profileId: string`, `sinceIndex?: number \| null` | `LogEntry[]`        |
 | `copy_address`          | `profileId?: string`                   | `string` (public `host:port`; rejects when not connected) |
 | `open_config_folder`    | —                                      | `void`                         |
