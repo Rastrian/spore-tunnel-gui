@@ -7,6 +7,10 @@
 //! * Bore servers rely on TCP health: EOF or an IO error on the control
 //!   connection is the only death signal.
 //!
+//! The client never originates keepalive frames: real bore servers decode
+//! `ClientMessage` as a closed enum and drop unknown variants, and Spore
+//! expects client silence on the control plane.
+//!
 //! On death the session is fully torn down — control connection dropped and
 //! every forwarder task aborted — before `auto_reconnect` dials again with
 //! exponential backoff (5 s → 60 s cap, ±20% jitter).
@@ -14,7 +18,7 @@
 use super::client::{self, ServerKind, TunnelClient, TunnelConfig};
 use super::events::{LogEntry, LogLevel};
 use super::forward::{self, ByteCounters};
-use super::protocol::{send, ClientMessage, FrameReader, ServerMessage};
+use super::protocol::{FrameReader, ServerMessage};
 use super::TunnelError;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,8 +32,6 @@ use tokio::time::timeout;
 
 /// Cap of the in-memory log ring surfaced through [`TunnelStatus`].
 pub const MAX_LOG_LINES: usize = 1024;
-/// Client-side keepalive cadence for Bore servers.
-const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 /// Grace period for the supervisor task to exit on `stop()` before abort.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
@@ -474,15 +476,16 @@ async fn run_session(
     cfg: &SupervisorConfig,
     kind: ServerKind,
     mut reader: FrameReader<OwnedReadHalf>,
-    mut writer: OwnedWriteHalf,
+    // Held (not written to) for the whole session: dropping the owned write
+    // half shuts down the write side of the TCP stream, which the server
+    // would read as end-of-stream and tear the tunnel down.
+    _writer: OwnedWriteHalf,
     shared: &Arc<Shared>,
 ) -> Result<(), TunnelError> {
     let mut forwarders: JoinSet<()> = JoinSet::new();
     let mut stop_rx = shared.stop_tx.subscribe();
     let spore = kind == ServerKind::Spore;
     let mut ack_deadline = tokio::time::Instant::now() + cfg.ack_window;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let result = loop {
         tokio::select! {
@@ -520,12 +523,6 @@ async fn run_session(
 
             _ = tokio::time::sleep_until(ack_deadline), if spore => {
                 break Err(TunnelError::AckTimeout);
-            }
-
-            _ = heartbeat.tick(), if !spore => {
-                if let Err(e) = send(&mut writer, &ClientMessage::Heartbeat).await {
-                    break Err(TunnelError::Io(e));
-                }
             }
 
             // Only armed while forwarders exist: join_next() on an empty
