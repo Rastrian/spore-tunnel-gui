@@ -73,7 +73,11 @@ impl SupervisorConfig {
 }
 
 /// Snapshot of everything the UI shows about the tunnel.
+///
+/// Serialized camelCase — this shape is part of the `tunnel://status`
+/// event contract (`docs/EVENTS.md`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TunnelStatus {
     /// `idle` | `starting` | `connected` | `failed` | `stopped`
     /// (a reconnecting tunnel reports `starting`).
