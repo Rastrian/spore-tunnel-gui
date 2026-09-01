@@ -32,9 +32,12 @@ run `npm run build` for real UI work.
 
 ## Architecture
 
-- `src-tauri/src/bore.rs` — current monolithic Bore client (timeout 3s, framing
-  length-prefixed JSON with u32 LE, HMAC-SHA256 auth). Being refactored into
-  `src-tauri/src/tunnel/` (protocol, client, forward, supervisor, manager).
+- `src-tauri/src/tunnel/` — protocol stack. **Wire framing: JSON messages delimited
+  by a single NUL byte (0x00), max frame 256 bytes** — matches ekzhang/bore
+  (`AnyDelimiterCodec`, delims `[0]`, `MAX_FRAME_LENGTH = 256`) and Spore's
+  `lib/spore/shared.ex`. NEVER use length-prefix framing (u32 LE or BE) — verified
+  wrong against a real bore server on 2026-09-01 (server logs `unable to parse
+  message`; the original bore-tunnel-gui `bore.rs` was NUL-delimited and correct).
 - `src-tauri/src/commands.rs` — Tauri commands; state currently single `Arc<Mutex<BoreClient>>`.
 - `src-tauri/src/config.rs` — JSON config + OS keyring secret (service `bore-minecraft-tunnel`,
   being renamed to `spore-tunnel-gui`).
