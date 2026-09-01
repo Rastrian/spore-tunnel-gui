@@ -12,6 +12,7 @@
 //! exponential backoff (5 s → 60 s cap, ±20% jitter).
 
 use super::client::{self, ServerKind, TunnelClient, TunnelConfig};
+use super::events::{LogEntry, LogLevel};
 use super::forward::{self, ByteCounters};
 use super::protocol::{send, ClientMessage, FrameReader, ServerMessage};
 use super::TunnelError;
@@ -146,7 +147,10 @@ struct InnerState {
     connected_at: Option<Instant>,
     reconnects: u32,
     last_error: Option<String>,
-    logs: VecDeque<String>,
+    /// Ring of the last [`MAX_LOG_LINES`] structured entries.
+    log_ring: VecDeque<LogEntry>,
+    /// Index of the NEXT log entry; resets when the tunnel restarts.
+    next_log_index: u64,
 }
 
 impl Default for InnerState {
@@ -160,18 +164,34 @@ impl Default for InnerState {
             connected_at: None,
             reconnects: 0,
             last_error: None,
-            logs: VecDeque::new(),
+            log_ring: VecDeque::new(),
+            next_log_index: 0,
         }
     }
 }
 
 impl InnerState {
-    fn push_log(&mut self, line: String) {
-        if self.logs.len() >= MAX_LOG_LINES {
-            self.logs.pop_front();
+    fn push_log(&mut self, level: LogLevel, line: String) {
+        if self.log_ring.len() >= MAX_LOG_LINES {
+            self.log_ring.pop_front();
         }
-        self.logs.push_back(line);
+        let index = self.next_log_index;
+        self.next_log_index = index.saturating_add(1);
+        self.log_ring.push_back(LogEntry {
+            index,
+            ts: now_ms(),
+            level,
+            line,
+        });
     }
+}
+
+/// Unix epoch milliseconds (0 if the clock is before the epoch).
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 struct Shared {
@@ -192,8 +212,8 @@ impl Shared {
         self.status_tx.send_replace(status);
     }
 
-    fn log(&self, line: String) {
-        self.mutate(|s| s.push_log(line));
+    fn log(&self, level: LogLevel, line: String) {
+        self.mutate(|s| s.push_log(level, line));
     }
 
     fn stopping(&self) -> bool {
@@ -214,7 +234,7 @@ fn build_status(s: &InnerState, counters: &ByteCounters) -> TunnelStatus {
         bytes_down,
         reconnects: s.reconnects,
         last_error: s.last_error.clone(),
-        logs: s.logs.iter().cloned().collect(),
+        logs: s.log_ring.iter().map(|e| e.line.clone()).collect(),
     }
 }
 
@@ -259,6 +279,37 @@ impl TunnelSupervisor {
         self.status_rx.clone()
     }
 
+    /// Ring entries with `index` strictly greater than `since`, oldest
+    /// first — the incremental stream behind `tunnel://log` and
+    /// `get_tunnel_log(profileId, sinceIndex: Some(n))`. Entries evicted
+    /// from the ring are skipped silently.
+    pub fn log_entries_since(&self, since: u64) -> Vec<LogEntry> {
+        let s = self.shared.inner.lock().unwrap();
+        s.log_ring
+            .iter()
+            .filter(|e| e.index > since)
+            .cloned()
+            .collect()
+    }
+
+    /// Every entry currently in the ring, oldest first (the
+    /// `sinceIndex: null` backfill of `get_tunnel_log`).
+    pub fn log_snapshot(&self) -> Vec<LogEntry> {
+        self.shared.inner.lock().unwrap().log_ring.iter().cloned().collect()
+    }
+
+    /// Index of the newest ring entry (0 when nothing is logged yet).
+    pub fn last_log_index(&self) -> u64 {
+        self.shared
+            .inner
+            .lock()
+            .unwrap()
+            .log_ring
+            .back()
+            .map(|e| e.index)
+            .unwrap_or(0)
+    }
+
     pub fn is_running(&self) -> bool {
         matches!(
             self.shared.inner.lock().unwrap().state,
@@ -286,10 +337,10 @@ impl TunnelSupervisor {
                 ..InnerState::default()
             };
         });
-        self.shared.log(format!(
-            "[tunnel] connecting to {}",
-            cfg.tunnel.control_addr()
-        ));
+        self.shared.log(
+            LogLevel::Info,
+            format!("connecting to {}", cfg.tunnel.control_addr()),
+        );
 
         let handle = tokio::spawn(supervisor_task(cfg, self.shared.clone()));
         *self.task.lock().await = Some(handle);
@@ -309,7 +360,7 @@ impl TunnelSupervisor {
             s.state = State::Stopped;
             s.connected_at = None;
         });
-        self.shared.log("[tunnel] stopped by user".to_string());
+        self.shared.log(LogLevel::Info, "stopped by user".to_string());
     }
 
     /// Wait (up to `within`) until `state` is one of `states`, then return
@@ -348,11 +399,14 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
                     s.connected_at = Some(Instant::now());
                     s.last_error = None;
                 });
-                shared.log(format!(
-                    "[tunnel] connected to {} ({}) — listening at {remote}",
-                    cfg.tunnel.control_addr(),
-                    info.kind.as_str()
-                ));
+                shared.log(
+                    LogLevel::Info,
+                    format!(
+                        "connected to {} ({}) — listening at {remote}",
+                        cfg.tunnel.control_addr(),
+                        info.kind.as_str()
+                    ),
+                );
 
                 let outcome = run_session(&cfg, info.kind, reader, writer, &shared).await;
                 if shared.stopping() {
@@ -370,7 +424,7 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
                     s.assigned_port = None;
                     s.connected_at = None;
                 });
-                shared.log(format!("[error] tunnel down: {err}"));
+                shared.log(LogLevel::Error, format!("tunnel down: {err}"));
                 if !cfg.auto_reconnect {
                     shared.mutate(|s| s.state = State::Failed);
                     break;
@@ -385,7 +439,7 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
                         State::Failed
                     };
                 });
-                shared.log(format!("[error] connect failed: {err}"));
+                shared.log(LogLevel::Error, format!("connect failed: {err}"));
                 if !cfg.auto_reconnect || shared.stopping() {
                     break;
                 }
@@ -394,10 +448,10 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
 
         let delay = backoff_delay(deaths, cfg.backoff_base, cfg.backoff_max, &mut rng);
         deaths = deaths.saturating_add(1);
-        shared.log(format!(
-            "[tunnel] reconnecting in {} ms",
-            delay.as_millis()
-        ));
+        shared.log(
+            LogLevel::Info,
+            format!("reconnecting in {} ms", delay.as_millis()),
+        );
         let mut stop_rx = shared.stop_tx.subscribe();
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -454,10 +508,13 @@ async fn run_session(
                 }
                 Ok(Some(ServerMessage::Heartbeat)) => {}
                 Ok(Some(ServerMessage::Error(e))) => {
-                    shared.log(format!("[tunnel] server error: {e}"));
+                    shared.log(LogLevel::Error, format!("server error: {e}"));
                 }
                 Ok(Some(other)) => {
-                    shared.log(format!("[tunnel] unexpected control message: {other:?}"));
+                    shared.log(
+                        LogLevel::Info,
+                        format!("unexpected control message: {other:?}"),
+                    );
                 }
             },
 
@@ -491,7 +548,7 @@ fn spawn_forwarder(
 ) {
     let cfg = cfg.clone();
     let shared = shared.clone();
-    shared.log(format!("[conn] incoming connection {conn_id}"));
+    shared.log(LogLevel::Info, format!("incoming connection {conn_id}"));
     forwarders.spawn(async move {
         let _guard = ConnGuard::new(shared.active_conns.clone());
 
@@ -500,7 +557,7 @@ fn spawn_forwarder(
         let mut local = match forward::connect_local(&cfg.local_host, cfg.local_port).await {
             Ok(local) => local,
             Err(e) => {
-                shared.log(format!("[conn] {e}"));
+                shared.log(LogLevel::Error, format!("{e}"));
                 return;
             }
         };
@@ -509,7 +566,7 @@ fn spawn_forwarder(
             match client::open_data_connection(&cfg.tunnel, &cfg.secret, &conn_id).await {
                 Ok(pair) => pair,
                 Err(e) => {
-                    shared.log(format!("[conn] data channel failed: {e}"));
+                    shared.log(LogLevel::Error, format!("data channel failed: {e}"));
                     return;
                 }
             };
@@ -522,7 +579,7 @@ fn spawn_forwarder(
         if let Err(e) =
             forward::forward_bidirectional(remote, local, shared.counters.clone()).await
         {
-            shared.log(format!("[conn] {e}"));
+            shared.log(LogLevel::Error, format!("{e}"));
         }
     });
 }
@@ -817,14 +874,69 @@ mod tests {
     }
 
     #[test]
-    fn log_ring_is_capped_at_1024_lines() {
+    fn log_ring_is_capped_at_1024_indexed_lines() {
         let mut s = InnerState::default();
         for i in 0..1500 {
-            s.push_log(format!("line-{i}"));
+            s.push_log(LogLevel::Error, format!("line-{i}"));
         }
-        assert_eq!(s.logs.len(), MAX_LOG_LINES);
-        assert!(s.logs.iter().any(|l| l == "line-1499"));
-        assert!(!s.logs.iter().any(|l| l == "line-0"));
-        assert!(s.logs.front().unwrap().starts_with("line-476"));
+        assert_eq!(s.log_ring.len(), MAX_LOG_LINES);
+        // Oldest survivor is exactly MAX_LOG_LINES behind the newest index.
+        assert_eq!(s.log_ring.front().unwrap().index, 1500 - MAX_LOG_LINES as u64);
+        assert_eq!(s.log_ring.front().unwrap().line, "line-476");
+        assert_eq!(s.log_ring.back().unwrap().index, 1499);
+        assert_eq!(s.log_ring.back().unwrap().line, "line-1499");
+        assert_eq!(s.next_log_index, 1500);
+        // Every entry carries a timestamp and its level.
+        assert!(s.log_ring.iter().all(|e| e.ts > 0 && e.level == LogLevel::Error));
+    }
+
+    #[test]
+    fn log_entries_since_returns_strictly_newer_entries() {
+        let mut s = InnerState::default();
+        s.push_log(LogLevel::Info, "a".to_string());
+        s.push_log(LogLevel::Error, "b".to_string());
+        s.push_log(LogLevel::Info, "c".to_string());
+
+        let tail = s.log_ring.iter().filter(|e| e.index > 0).cloned().collect::<Vec<_>>();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].line, "b");
+        assert_eq!(tail[0].level, LogLevel::Error);
+        assert_eq!(tail[1].line, "c");
+
+        // Nothing newer than the newest index.
+        assert_eq!(s.log_ring.iter().filter(|e| e.index > 2).count(), 0);
+    }
+
+    #[tokio::test]
+    async fn supervisor_exposes_log_lines_without_prefixes() {
+        let sup = TunnelSupervisor::new();
+        // Port with no listener behind it: deterministic failure logs.
+        let tmp = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = tmp.local_addr().unwrap();
+        drop(tmp);
+
+        let mut cfg = fast_config(addr, "", 25565);
+        cfg.auto_reconnect = false;
+        sup.start(cfg).await.unwrap();
+        let status = sup.wait_for(&["failed"], Duration::from_secs(5)).await;
+
+        assert!(status
+            .logs
+            .iter()
+            .any(|l| l.starts_with("connect failed:") || l.starts_with("connecting to")));
+        // The status snapshot may race one late log line; compare via a
+        // fresh full snapshot and assert the incremental read agrees.
+        let entries = sup.log_snapshot();
+        assert!(entries.len() >= status.logs.len());
+        assert!(entries.iter().any(|e| e.level == LogLevel::Error && e.ts > 0));
+        let last = sup.last_log_index();
+        assert!(last > 0);
+        // Strictly-newer semantics: `since = last` yields nothing …
+        assert!(sup.log_entries_since(last).is_empty());
+        // … and a tail read skips exactly what was already seen.
+        let tail = sup.log_entries_since(last - 1);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].index, last);
+        sup.stop().await;
     }
 }
