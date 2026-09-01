@@ -95,9 +95,20 @@ impl FrameDecoder {
         self.buf.drain(..4 + len);
         Ok(Some(payload))
     }
+
+    /// Returns and clears every buffered byte, complete frames and partials
+    /// alike.
+    ///
+    /// Used when a connection switches from framed control traffic to a raw
+    /// byte stream (after `Accept`): visitor bytes that arrived in the same
+    /// TCP segment as the last frame must not be lost.
+    pub fn drain_buffer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
 }
 
 /// Reads length-prefixed frames from an async byte stream.
+#[derive(Debug)]
 pub struct FrameReader<R> {
     stream: R,
     decoder: FrameDecoder,
@@ -140,6 +151,35 @@ impl<R: tokio::io::AsyncRead + Unpin> FrameReader<R> {
             self.decoder.push(&self.chunk[..n]);
         }
     }
+
+    /// Next inbound server message; `Ok(None)` on a clean end of stream.
+    ///
+    /// Malformed JSON surfaces as [`TunnelError::Protocol`], stream failures
+    /// as [`TunnelError::Io`].
+    pub async fn next_server_message(&mut self) -> Result<Option<ServerMessage>, TunnelError> {
+        self.next_typed(parse_server_message).await
+    }
+
+    /// Next inbound client message; `Ok(None)` on a clean end of stream.
+    pub async fn next_client_message(&mut self) -> Result<Option<ClientMessage>, TunnelError> {
+        self.next_typed(parse_client_message).await
+    }
+
+    async fn next_typed<T>(
+        &mut self,
+        parse: fn(&[u8]) -> Result<T, ProtocolError>,
+    ) -> Result<Option<T>, TunnelError> {
+        match self.next_frame().await? {
+            None => Ok(None),
+            Some(payload) => parse(&payload).map(Some).map_err(TunnelError::from),
+        }
+    }
+
+    /// Decomposes into the underlying stream and the decoder (with any
+    /// buffered bytes intact) — for handing a connection back to raw mode.
+    pub fn into_parts(self) -> (R, FrameDecoder) {
+        (self.stream, self.decoder)
+    }
 }
 
 /// Writes `payload` as a single length-prefixed frame and flushes.
@@ -149,6 +189,19 @@ pub async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, payload: &[u8]) ->
     w.write_all(&len.to_le_bytes()).await?;
     w.write_all(payload).await?;
     w.flush().await
+}
+
+/// Serializes `msg` and writes it as one framed message.
+///
+/// Note: `encode_frame` already prefixes; passing its output to
+/// [`write_frame`] would prefix twice. This helper does it right.
+pub async fn send<W: AsyncWriteExt + Unpin, T: serde::Serialize + ?Sized>(
+    w: &mut W,
+    msg: &T,
+) -> io::Result<()> {
+    let payload =
+        serde_json::to_vec(msg).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    write_frame(w, &payload).await
 }
 
 /// Client version advertised in `HelloEx`.
@@ -371,6 +424,112 @@ mod tests {
     struct Probe {
         hello: u16,
     }
+
+    /// In-memory [`tokio::io::AsyncRead`] source over a byte slice.
+    struct SliceSource(std::io::Cursor<Vec<u8>>);
+
+    impl SliceSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self(std::io::Cursor::new(bytes))
+        }
+    }
+
+    impl tokio::io::AsyncRead for SliceSource {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let mut cursor = &mut self.get_mut().0;
+            Poll::Ready(std::io::Read::read(&mut cursor, buf.initialize_unfilled()).map(|n| {
+                // SAFETY-free alternative: advance the ReadBuf by n.
+                unsafe { buf.assume_init(n) };
+                buf.advance(n);
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn send_writes_exactly_one_frame() {
+        let mut sink = VecSink(Vec::new());
+        send(&mut sink, &ClientMessage::Hello(7)).await.unwrap();
+        assert_eq!(sink.0, encode_frame(&ClientMessage::Hello(7)).unwrap());
+        let mut reader = FrameReader::new(SliceSource::new(sink.0));
+        assert_eq!(
+            reader.next_client_message().await.unwrap(),
+            Some(ClientMessage::Hello(7))
+        );
+    }
+
+    #[test]
+    fn drain_buffer_returns_complete_and_partial_bytes_then_clears() {
+        let frame = encode_frame(&Probe { hello: 9 }).unwrap();
+        let mut dec = FrameDecoder::new();
+        dec.push(&frame);
+        dec.push(b"raw tail");
+
+        let mut expected = frame.clone();
+        expected.extend_from_slice(b"raw tail");
+        assert_eq!(dec.drain_buffer(), expected);
+        assert!(dec.next_payload().unwrap().is_none());
+        assert!(dec.drain_buffer().is_empty());
+    }
+
+    #[tokio::test]
+    async fn frame_reader_into_parts_hands_back_pending_raw_bytes() {
+        let frame = encode_frame(&Probe { hello: 3 }).unwrap();
+        let mut chunk = frame.clone();
+        chunk.extend_from_slice(b"tail");
+
+        let mut reader = FrameReader::new(SliceSource::new(chunk));
+        assert!(reader.next_frame().await.unwrap().is_some());
+
+        let (_stream, mut decoder) = reader.into_parts();
+        assert_eq!(decoder.drain_buffer(), b"tail");
+    }
+
+    #[tokio::test]
+    async fn frame_reader_yields_typed_server_messages_until_eof() {
+        let mut sink = VecSink(Vec::new());
+        send(&mut sink, &ServerMessage::Hello(42)).await.unwrap();
+        write_frame(&mut sink, &serde_json::to_vec("Ack").unwrap())
+            .await
+            .unwrap();
+        send(&mut sink, &ServerMessage::Error("boom".into()))
+            .await
+            .unwrap();
+
+        let mut reader = FrameReader::new(SliceSource::new(sink.0));
+        assert_eq!(
+            reader.next_server_message().await.unwrap(),
+            Some(ServerMessage::Hello(42))
+        );
+        assert_eq!(
+            reader.next_server_message().await.unwrap(),
+            Some(ServerMessage::Ack)
+        );
+        assert_eq!(
+            reader.next_server_message().await.unwrap(),
+            Some(ServerMessage::Error("boom".into()))
+        );
+        assert_eq!(reader.next_server_message().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn frame_reader_yields_typed_client_messages() {
+        let mut sink = VecSink(Vec::new());
+        send(&mut sink, &ClientMessage::Accept("abc".into()))
+            .await
+            .unwrap();
+
+        let mut reader = FrameReader::new(SliceSource::new(sink.0));
+        assert_eq!(
+            reader.next_client_message().await.unwrap(),
+            Some(ClientMessage::Accept("abc".into()))
+        );
+        assert_eq!(reader.next_client_message().await.unwrap(), None);
+    }
+
 
     /// In-memory [`tokio::io::AsyncWrite`] sink: records every flushed byte.
     struct VecSink(Vec<u8>);
