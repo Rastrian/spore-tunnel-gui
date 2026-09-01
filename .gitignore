@@ -4,3 +4,4 @@ src-tauri/target/
 .DS_Store
 *.log
 docs/
+src-tauri/gen/
