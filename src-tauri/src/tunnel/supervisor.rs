@@ -1,11 +1,15 @@
 //! Tunnel supervisor: owns the control loop, forwarder tasks, reconnects,
 //! status and logs for ONE tunnel.
 //!
-//! Liveness policy:
-//! * Spore servers (HelloEx seen) must send `Ack` frames; silence for
-//!   longer than `ack_window` (default 10 s) declares the tunnel dead.
-//! * Bore servers rely on TCP health: EOF or an IO error on the control
-//!   connection is the only death signal.
+//! Liveness policy (both dialects): real bore and Spore servers push a
+//! keepalive frame on the control connection roughly every 500 ms — bore
+//! sends the bare string `"Heartbeat"`, Spore sends `"Heartbeat"` too (our
+//! mock models Spore's keepalive as `"Ack"`, which is consumed equally).
+//! Silence for longer than `ack_window` (default 10 s, ~20 missed beats)
+//! declares the tunnel dead, as do EOF and IO errors (TCP health). The
+//! client never originates keepalive frames: real bore servers decode
+//! `ClientMessage` as a closed enum and drop unknown variants, and Spore
+//! expects client silence on the control plane.
 //!
 //! On death the session is fully torn down — control connection dropped and
 //! every forwarder task aborted — before `auto_reconnect` dials again with
@@ -14,7 +18,7 @@
 use super::client::{self, ServerKind, TunnelClient, TunnelConfig};
 use super::events::{LogEntry, LogLevel};
 use super::forward::{self, ByteCounters};
-use super::protocol::{send, ClientMessage, FrameReader, ServerMessage};
+use super::protocol::{FrameReader, ServerMessage};
 use super::TunnelError;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -28,8 +32,6 @@ use tokio::time::timeout;
 
 /// Cap of the in-memory log ring surfaced through [`TunnelStatus`].
 pub const MAX_LOG_LINES: usize = 1024;
-/// Client-side keepalive cadence for Bore servers.
-const HEARTBEAT_EVERY: Duration = Duration::from_secs(5);
 /// Grace period for the supervisor task to exit on `stop()` before abort.
 const STOP_GRACE: Duration = Duration::from_secs(2);
 
@@ -41,7 +43,8 @@ pub struct SupervisorConfig {
     pub local_host: String,
     pub local_port: u16,
     pub auto_reconnect: bool,
-    /// Spore Ack keepalive window (default 10 s).
+    /// Keepalive window (default 10 s): no server Heartbeat/Ack within it
+    /// declares the tunnel dead. Real servers beat every ~500 ms.
     pub ack_window: Duration,
     /// First reconnect delay (default 5 s), doubling per death.
     pub backoff_base: Duration,
@@ -408,7 +411,7 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
                     ),
                 );
 
-                let outcome = run_session(&cfg, info.kind, reader, writer, &shared).await;
+                let outcome = run_session(&cfg, reader, writer, &shared).await;
                 if shared.stopping() {
                     break;
                 }
@@ -472,17 +475,16 @@ async fn supervisor_task(cfg: SupervisorConfig, shared: Arc<Shared>) {
 /// Every exit path performs a FULL teardown of the forwarder set.
 async fn run_session(
     cfg: &SupervisorConfig,
-    kind: ServerKind,
     mut reader: FrameReader<OwnedReadHalf>,
-    mut writer: OwnedWriteHalf,
+    // Held (not written to) for the whole session: dropping the owned write
+    // half shuts down the write side of the TCP stream, which the server
+    // would read as end-of-stream and tear the tunnel down.
+    _writer: OwnedWriteHalf,
     shared: &Arc<Shared>,
 ) -> Result<(), TunnelError> {
     let mut forwarders: JoinSet<()> = JoinSet::new();
     let mut stop_rx = shared.stop_tx.subscribe();
-    let spore = kind == ServerKind::Spore;
-    let mut ack_deadline = tokio::time::Instant::now() + cfg.ack_window;
-    let mut heartbeat = tokio::time::interval(HEARTBEAT_EVERY);
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut liveness_deadline = tokio::time::Instant::now() + cfg.ack_window;
 
     let result = loop {
         tokio::select! {
@@ -503,10 +505,11 @@ async fn run_session(
                 Ok(Some(ServerMessage::Connection(id))) => {
                     spawn_forwarder(cfg, &mut forwarders, shared, id);
                 }
-                Ok(Some(ServerMessage::Ack)) => {
-                    ack_deadline = tokio::time::Instant::now() + cfg.ack_window;
+                // Both refresh signals, either dialect: bore heartbeats
+                // with the bare string, Spore may Ack or heartbeat.
+                Ok(Some(ServerMessage::Ack | ServerMessage::Heartbeat)) => {
+                    liveness_deadline = tokio::time::Instant::now() + cfg.ack_window;
                 }
-                Ok(Some(ServerMessage::Heartbeat)) => {}
                 Ok(Some(ServerMessage::Error(e))) => {
                     shared.log(LogLevel::Error, format!("server error: {e}"));
                 }
@@ -518,14 +521,8 @@ async fn run_session(
                 }
             },
 
-            _ = tokio::time::sleep_until(ack_deadline), if spore => {
+            _ = tokio::time::sleep_until(liveness_deadline) => {
                 break Err(TunnelError::AckTimeout);
-            }
-
-            _ = heartbeat.tick(), if !spore => {
-                if let Err(e) = send(&mut writer, &ClientMessage::Heartbeat).await {
-                    break Err(TunnelError::Io(e));
-                }
             }
 
             // Only armed while forwarders exist: join_next() on an empty
@@ -686,7 +683,13 @@ mod tests {
 
     #[tokio::test]
     async fn bore_lifecycle_with_data_plane() {
-        let mock = mock().start().await.unwrap();
+        // Heartbeating bore mock: with the liveness window armed in both
+        // dialects, a silent server would be declared dead.
+        let mock = mock()
+            .ack_interval(Duration::from_millis(50))
+            .start()
+            .await
+            .unwrap();
         let (local, _local_handle) = spawn_reply_once_service().await.unwrap();
         let sup = TunnelSupervisor::new();
         sup.start(fast_config(mock.control_addr(), "", local.port()))
@@ -717,14 +720,46 @@ mod tests {
         assert_eq!(status.reconnects, 0);
         assert_eq!(sup.active_connections(), 1);
 
-        // Bore session is healthy without acks.
+        // Several liveness windows (300 ms) pass while the server keeps
+        // heartbeating every 50 ms: the session must survive them all
+        // without a single reconnect.
         tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(sup.status().state, "connected");
+        let status = sup.status();
+        assert_eq!(status.state, "connected", "status: {status:?}");
+        assert_eq!(status.reconnects, 0, "status: {status:?}");
+        assert_eq!(mock.hello_count(), 1, "no silent reconnects allowed");
 
         sup.stop().await;
         let status = sup.status();
         assert_eq!(status.state, "stopped");
         assert_eq!(sup.active_connections(), 0, "forwarders must be gone");
+        mock.stop().await;
+    }
+
+    #[tokio::test]
+    async fn bore_heartbeat_silence_declares_death_and_reconnects() {
+        // A bore server that stops heartbeating (dead without FIN/RST, the
+        // ghost-port scenario) must be declared dead by the liveness window
+        // and reconnected with a fresh legacy-Hello handshake.
+        let mock = mock().start().await.unwrap(); // silent control plane
+        let (local, _local_handle) = spawn_reply_once_service().await.unwrap();
+        let mut cfg = fast_config(mock.control_addr(), "", local.port());
+        cfg.ack_window = Duration::from_millis(120);
+        let sup = TunnelSupervisor::new();
+        sup.start(cfg).await.unwrap();
+        sup.wait_for(&["connected"], Duration::from_secs(3)).await;
+
+        let status = eventually(&sup, Duration::from_secs(5), |s| s.reconnects >= 2).await;
+        assert_eq!(status.server_kind.as_deref(), Some("Bore"));
+        assert!(matches!(status.last_error.as_deref(), Some(e) if e.contains("ack")));
+        assert!(
+            sup.wait_for(&["connected"], Duration::from_secs(3))
+                .await
+                .state
+                == "connected"
+        );
+        assert!(mock.hello_count() >= 3, "hellos: {}", mock.hello_count());
+        sup.stop().await;
         mock.stop().await;
     }
 
@@ -786,7 +821,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_death_tears_down_forwarders_and_reconnects() {
-        let mock = mock().start().await.unwrap();
+        let mock = mock()
+            .ack_interval(Duration::from_millis(50))
+            .start()
+            .await
+            .unwrap();
         let (local, _local_handle) = spawn_reply_once_service().await.unwrap();
         let sup = TunnelSupervisor::new();
         sup.start(fast_config(mock.control_addr(), "", local.port()))

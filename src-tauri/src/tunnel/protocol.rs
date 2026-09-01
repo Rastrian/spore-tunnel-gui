@@ -1,9 +1,11 @@
 //! Wire protocol for the Spore Tunnel control channel.
 //!
-//! Framing is length-delimited JSON: a `u32` little-endian byte count
-//! followed by that many bytes of compact JSON. Message envelopes are
-//! externally tagged and byte-compatible with `bore` servers, plus a
-//! `spore` dialect that sends some values untagged.
+//! Framing is null-delimited JSON: each message is a compact JSON document
+//! terminated by a single NUL byte (`0x00`), with frames capped at
+//! [`MAX_FRAME_LEN`] — byte-compatible with `bore` servers
+//! (`AnyDelimiterCodec` over delimiters `[0]`, max length 256) and Spore's
+//! `Delimited` transport (`lib/spore/shared.ex`). Message envelopes are
+//! externally tagged; the spore dialect sends some values untagged.
 
 use std::io;
 
@@ -11,8 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::tunnel::TunnelError;
 
-/// Largest frame payload we accept on the wire (1 MiB).
-pub const MAX_FRAME_LEN: usize = 1024 * 1024;
+/// Largest frame we accept on the wire, matching bore's `MAX_FRAME_LENGTH`
+/// and Spore's `max_frame_length`.
+pub const MAX_FRAME_LEN: usize = 256;
 
 /// Size of the chunks [`FrameReader`] pulls from the stream.
 const READ_CHUNK: usize = 8 * 1024;
@@ -20,7 +23,7 @@ const READ_CHUNK: usize = 8 * 1024;
 /// Errors raised while encoding, decoding or interpreting wire traffic.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    /// A frame prefix announced a payload larger than [`MAX_FRAME_LEN`].
+    /// More than [`MAX_FRAME_LEN`] bytes buffered without a delimiter.
     #[error("frame length {0} exceeds maximum {MAX_FRAME_LEN}")]
     FrameTooLarge(usize),
 
@@ -39,20 +42,30 @@ impl From<ProtocolError> for TunnelError {
     }
 }
 
-/// Serializes `msg` and prefixes it with its byte length as a `u32`
-/// little-endian header.
+/// Serializes `msg` and appends the NUL delimiter.
 pub fn encode_frame<T: serde::Serialize + ?Sized>(msg: &T) -> io::Result<Vec<u8>> {
-    let payload = serde_json::to_vec(msg)
+    let mut frame = serde_json::to_vec(msg)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let len = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload exceeds u32 length"))?;
-    let mut frame = Vec::with_capacity(4 + payload.len());
-    frame.extend_from_slice(&len.to_le_bytes());
-    frame.extend_from_slice(&payload);
+    ensure_sendable(frame.len())?;
+    frame.push(0);
     Ok(frame)
 }
 
-/// Incremental decoder for length-prefixed frames fed from arbitrary,
+/// Rejects payloads whose frame (payload + delimiter) could not be decoded
+/// by the strictest receiver: Spore's `read_frame` fails on buffers over
+/// [`MAX_FRAME_LEN`] bytes *including* the delimiter.
+fn ensure_sendable(payload_len: usize) -> io::Result<()> {
+    if payload_len + 1 > MAX_FRAME_LEN {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("frame of {payload_len} payload bytes exceeds maximum {MAX_FRAME_LEN}"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Incremental decoder for NUL-delimited frames fed from arbitrary,
 /// possibly fragmented byte chunks.
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
@@ -74,26 +87,22 @@ impl FrameDecoder {
         self.buf.extend_from_slice(chunk);
     }
 
-    /// Returns the next complete frame payload, if one is fully buffered.
+    /// Returns the payload of the next complete frame (the bytes before the
+    /// next NUL delimiter), if one is fully buffered.
     ///
-    /// Returns `Ok(None)` while the buffered data holds only a partial
-    /// header or payload. An oversized length prefix is rejected from the
-    /// prefix alone, before any payload arrives.
+    /// Returns `Ok(None)` while no delimiter has arrived yet. More than
+    /// [`MAX_FRAME_LEN`] bytes without a delimiter is rejected before the
+    /// frame completes, mirroring bore's `AnyDelimiterCodec`.
     pub fn next_payload(&mut self) -> Result<Option<Vec<u8>>, ProtocolError> {
-        if self.buf.len() < 4 {
-            return Ok(None);
+        if let Some(end) = self.buf.iter().position(|&b| b == 0) {
+            let payload = self.buf[..end].to_vec();
+            self.buf.drain(..=end);
+            return Ok(Some(payload));
         }
-        let header: [u8; 4] = self.buf[..4].try_into().expect("four header bytes");
-        let len = u32::from_le_bytes(header) as usize;
-        if len > MAX_FRAME_LEN {
-            return Err(ProtocolError::FrameTooLarge(len));
+        if self.buf.len() > MAX_FRAME_LEN {
+            return Err(ProtocolError::FrameTooLarge(self.buf.len()));
         }
-        if self.buf.len() < 4 + len {
-            return Ok(None);
-        }
-        let payload = self.buf[4..4 + len].to_vec();
-        self.buf.drain(..4 + len);
-        Ok(Some(payload))
+        Ok(None)
     }
 
     /// Returns and clears every buffered byte, complete frames and partials
@@ -127,8 +136,8 @@ impl<R: tokio::io::AsyncRead + Unpin> FrameReader<R> {
 
     /// Reads the next complete frame payload.
     ///
-    /// Returns `Ok(None)` on a clean end of stream. A frame announcing more
-    /// than [`MAX_FRAME_LEN`] bytes surfaces as
+    /// Returns `Ok(None)` on a clean end of stream. A frame exceeding
+    /// [`MAX_FRAME_LEN`] bytes without a delimiter surfaces as
     /// [`io::ErrorKind::InvalidData`].
     pub async fn next_frame(&mut self) -> io::Result<Option<Vec<u8>>> {
         loop {
@@ -182,12 +191,11 @@ impl<R: tokio::io::AsyncRead + Unpin> FrameReader<R> {
     }
 }
 
-/// Writes `payload` as a single length-prefixed frame and flushes.
+/// Writes `payload` plus a single NUL delimiter and flushes.
 pub async fn write_frame<W: AsyncWriteExt + Unpin>(w: &mut W, payload: &[u8]) -> io::Result<()> {
-    let len = u32::try_from(payload.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "payload exceeds u32 length"))?;
-    w.write_all(&len.to_le_bytes()).await?;
+    ensure_sendable(payload.len())?;
     w.write_all(payload).await?;
+    w.write_all(&[0]).await?;
     w.flush().await
 }
 
@@ -210,10 +218,20 @@ pub const CLIENT_VERSION: &str = "spore/1";
 /// Bare-string payload both dialects use to acknowledge a message.
 pub const ACK_PAYLOAD: &str = "Ack";
 
+/// Bare-string keepalive both real server dialects send periodically.
+pub const HEARTBEAT_PAYLOAD: &str = "Heartbeat";
+
 /// Messages the client sends to the server.
 ///
 /// Serde's derived externally-tagged forms are already wire-compatible with
-/// bore: `{"Hello":12345}`, `{"HelloEx":{...}}`, `{"Heartbeat":null}`, ...
+/// bore: `{"Hello":12345}`, `{"Authenticate":"..."}`, `{"Accept":"..."}`,
+/// plus the spore-only `{"HelloEx":{...}}`.
+///
+/// There is deliberately **no client `Heartbeat` variant**: real bore
+/// servers decode `ClientMessage` as a closed enum and drop the connection
+/// on unknown variants, and Spore expects client silence on the control
+/// plane after the handshake. Liveness is judged from inbound server
+/// heartbeats and TCP health.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ClientMessage {
     /// HMAC answer to the server's challenge.
@@ -229,8 +247,6 @@ pub enum ClientMessage {
         /// Feature names the client supports.
         features: Vec<String>,
     },
-    /// Keepalive ping.
-    Heartbeat,
     /// Accept an offered forwarded connection by id.
     Accept(String),
 }
@@ -239,8 +255,9 @@ pub enum ClientMessage {
 ///
 /// Serialization and deserialization are hand-written so the type tolerates
 /// both bore (always tagged) and spore (sometimes bare) dialects: challenges
-/// may arrive as a bare string, `Ack` may arrive as either form, and unknown
-/// fields or variants of the other dialect are ignored.
+/// may arrive as a bare string, `Ack` and `Heartbeat` arrive as bare strings
+/// (that is what both real servers actually emit) and are also understood
+/// tagged, and unknown fields or variants of the other dialect are ignored.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
     /// Auth challenge nonce.
@@ -256,7 +273,8 @@ pub enum ServerMessage {
     },
     /// Acknowledgement (serialized as the bare string `"Ack"`).
     Ack,
-    /// Keepalive reply.
+    /// Keepalive; real bore and Spore servers serialize it as the bare
+    /// string `"Heartbeat"` roughly every 500 ms.
     Heartbeat,
     /// Id of a forwarded connection the client should accept.
     Connection(String),
@@ -309,7 +327,7 @@ impl serde::Serialize for ServerMessage {
                 tagged(serializer, "HelloEx", &body)
             }
             ServerMessage::Ack => serializer.serialize_str(ACK_PAYLOAD),
-            ServerMessage::Heartbeat => tagged(serializer, "Heartbeat", &()),
+            ServerMessage::Heartbeat => serializer.serialize_str(HEARTBEAT_PAYLOAD),
             ServerMessage::Connection(id) => tagged(serializer, "Connection", id),
             ServerMessage::Error(msg) => tagged(serializer, "Error", msg),
         }
@@ -336,6 +354,8 @@ impl<'de> serde::Deserialize<'de> for ServerMessage {
             {
                 if value == ACK_PAYLOAD {
                     Ok(ServerMessage::Ack)
+                } else if value == HEARTBEAT_PAYLOAD {
+                    Ok(ServerMessage::Heartbeat)
                 } else {
                     // Spore servers send the challenge nonce untagged.
                     Ok(ServerMessage::Challenge(value.to_string()))
@@ -425,6 +445,13 @@ mod tests {
         hello: u16,
     }
 
+    #[test]
+    fn max_frame_len_matches_bore() {
+        // ekzhang/bore src/shared.rs: MAX_FRAME_LENGTH = 256, codec
+        // AnyDelimiterCodec::new_with_max_length(vec![0], vec![0], 256).
+        assert_eq!(MAX_FRAME_LEN, 256);
+    }
+
     /// In-memory [`tokio::io::AsyncRead`] source over a byte slice.
     struct SliceSource(std::io::Cursor<Vec<u8>>);
 
@@ -454,6 +481,8 @@ mod tests {
         let mut sink = VecSink(Vec::new());
         send(&mut sink, &ClientMessage::Hello(7)).await.unwrap();
         assert_eq!(sink.0, encode_frame(&ClientMessage::Hello(7)).unwrap());
+        // Explicit wire pin: compact JSON + a single NUL byte.
+        assert_eq!(sink.0, b"{\"Hello\":7}\x00");
         let mut reader = FrameReader::new(SliceSource::new(sink.0));
         assert_eq!(
             reader.next_client_message().await.unwrap(),
@@ -554,12 +583,10 @@ mod tests {
     }
 
     #[test]
-    fn encode_frame_writes_le_u32_length_prefix_then_payload() {
+    fn encode_frame_appends_single_nul_delimiter() {
         let frame = encode_frame(&Probe { hello: 12345 }).unwrap();
-        let payload = br#"{"hello":12345}"#;
-        let mut expected = Vec::with_capacity(4 + payload.len());
-        expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-        expected.extend_from_slice(payload);
+        let mut expected = br#"{"hello":12345}"#.to_vec();
+        expected.push(0);
         assert_eq!(frame, expected);
     }
 
@@ -635,9 +662,18 @@ mod tests {
     }
 
     #[test]
-    fn decoder_rejects_oversize_prefix_without_waiting_for_payload() {
+    fn decoder_yields_empty_payload_for_leading_delimiter() {
         let mut dec = FrameDecoder::new();
-        dec.push(&((MAX_FRAME_LEN + 1) as u32).to_le_bytes());
+        dec.push(&[0, b'x']);
+        assert_eq!(dec.next_payload().unwrap().unwrap(), Vec::<u8>::new());
+        // The trailing byte is a new, still-incomplete frame.
+        assert!(dec.next_payload().unwrap().is_none());
+    }
+
+    #[test]
+    fn decoder_rejects_oversize_frame_without_delimiter() {
+        let mut dec = FrameDecoder::new();
+        dec.push(&vec![b'a'; MAX_FRAME_LEN + 1]);
         match dec.next_payload() {
             Err(ProtocolError::FrameTooLarge(n)) => assert_eq!(n, MAX_FRAME_LEN + 1),
             other => panic!("expected FrameTooLarge, got {other:?}"),
@@ -645,28 +681,28 @@ mod tests {
     }
 
     #[test]
-    fn decoder_accepts_prefix_at_exactly_max_frame_len() {
+    fn decoder_tolerates_max_frame_bytes_without_delimiter() {
+        // At the limit the frame is still legal: the decoder keeps waiting
+        // for the delimiter instead of erroring.
         let mut dec = FrameDecoder::new();
-        dec.push(&(MAX_FRAME_LEN as u32).to_le_bytes());
-        // At the limit the frame is legal: the decoder just keeps waiting
-        // for the payload instead of erroring.
+        dec.push(&vec![b'a'; MAX_FRAME_LEN]);
         assert!(dec.next_payload().unwrap().is_none());
     }
 
     #[test]
-    fn decoder_handles_header_split_across_pushes() {
-        for split in 1..=3usize {
-            let frame = encode_frame(&Probe { hello: 3 }).unwrap();
-            let mut dec = FrameDecoder::new();
-            dec.push(&frame[..split]);
-            assert!(dec.next_payload().unwrap().is_none());
-            dec.push(&frame[split..]);
-            assert_eq!(
-                dec.next_payload().unwrap().unwrap(),
-                br#"{"hello":3}"#,
-                "failed with header split after {split} bytes"
-            );
-        }
+    fn decoder_accepts_max_length_payload_with_delimiter() {
+        // A payload of exactly MAX_FRAME_LEN bytes plus the delimiter is
+        // decodable: bore's codec searches buf[0..max_length+1) for the
+        // delimiter, so a delimiter at index max_length is in range.
+        let mut wire = vec![b'a'; MAX_FRAME_LEN];
+        wire.push(0);
+        let mut dec = FrameDecoder::new();
+        dec.push(&wire);
+        assert_eq!(
+            dec.next_payload().unwrap().unwrap(),
+            vec![b'a'; MAX_FRAME_LEN]
+        );
+        assert!(dec.next_payload().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -687,9 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn frame_reader_maps_oversize_frame_to_invalid_data() {
-        let mut wire = Vec::new();
-        wire.extend_from_slice(&((MAX_FRAME_LEN + 1) as u32).to_le_bytes());
-        wire.extend_from_slice(b"way too much data");
+        let wire = vec![b'a'; MAX_FRAME_LEN + 1];
         let mut reader = FrameReader::new(wire.as_slice());
         let err = reader.next_frame().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
@@ -706,12 +740,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_frame_emits_prefix_then_payload() {
+    async fn write_frame_appends_single_nul() {
         let mut sink = VecSink(Vec::new());
         write_frame(&mut sink, br#"{"hello":1}"#).await.unwrap();
-        let mut expected = Vec::new();
-        expected.extend_from_slice(&(11u32).to_le_bytes());
-        expected.extend_from_slice(br#"{"hello":1}"#);
+        let mut expected = br#"{"hello":1}"#.to_vec();
+        expected.push(0);
+        assert_eq!(sink.0, expected);
+    }
+
+    #[tokio::test]
+    async fn write_frame_rejects_payload_that_would_overflow_the_peer_limit() {
+        // Spore's read_frame rejects buffers over 256 bytes INCLUDING the
+        // delimiter, so frames we build may carry at most 255 payload bytes.
+        let mut sink = VecSink(Vec::new());
+        let big = vec![b'x'; MAX_FRAME_LEN];
+        let err = write_frame(&mut sink, &big).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(sink.0.is_empty(), "nothing may hit the wire");
+    }
+
+    #[tokio::test]
+    async fn write_frame_accepts_payload_at_the_peer_boundary() {
+        let mut sink = VecSink(Vec::new());
+        write_frame(&mut sink, &vec![b'x'; MAX_FRAME_LEN - 1])
+            .await
+            .unwrap();
+        let mut expected = vec![b'x'; MAX_FRAME_LEN - 1];
+        expected.push(0);
         assert_eq!(sink.0, expected);
     }
 
@@ -742,7 +797,6 @@ mod tests {
                 version: "spore/2".to_string(),
                 features: vec!["keepalive".to_string()],
             },
-            ClientMessage::Heartbeat,
             ClientMessage::Accept("550e8400-e29b-41d4-a716-446655440000".to_string()),
         ]
     }
@@ -790,9 +844,6 @@ mod tests {
                 },
                 r#"{"HelloEx":{"port":2,"version":"v2","features":["a","b"]}}"#,
             ),
-            // serde's derived externally-tagged form for a unit variant is
-            // the bare string — this is exactly what bore clients emit.
-            (ClientMessage::Heartbeat, r#""Heartbeat""#),
             (
                 ClientMessage::Accept("550e8400-e29b-41d4-a716-446655440000".to_string()),
                 r#"{"Accept":"550e8400-e29b-41d4-a716-446655440000"}"#,
@@ -808,17 +859,18 @@ mod tests {
     }
 
     #[test]
-    fn client_parse_accepts_both_heartbeat_forms() {
-        // The canonical derived form is the bare string; peers following
-        // the {"Heartbeat":null} spelling must still be understood.
-        assert_eq!(
-            parse_client_message(br#""Heartbeat""#).unwrap(),
-            ClientMessage::Heartbeat
-        );
-        assert_eq!(
-            parse_client_message(br#"{"Heartbeat":null}"#).unwrap(),
-            ClientMessage::Heartbeat
-        );
+    fn client_parse_rejects_heartbeat_frames() {
+        // Real bore's ClientMessage enum has no Heartbeat variant, so a
+        // client must never originate one; the parser enforces that by
+        // refusing to decode both spellings.
+        assert!(matches!(
+            parse_client_message(br#""Heartbeat""#),
+            Err(ProtocolError::MalformedJson(_))
+        ));
+        assert!(matches!(
+            parse_client_message(br#"{"Heartbeat":null}"#),
+            Err(ProtocolError::MalformedJson(_))
+        ));
     }
 
     #[test]
@@ -849,7 +901,9 @@ mod tests {
                 r#"{"HelloEx":{"port":2,"features":["ex"]}}"#,
             ),
             (ServerMessage::Ack, r#""Ack""#),
-            (ServerMessage::Heartbeat, r#"{"Heartbeat":null}"#),
+            // Real bore and Spore servers emit the keepalive as the bare
+            // string "Heartbeat" (unit variant of the server enum).
+            (ServerMessage::Heartbeat, r#""Heartbeat""#),
             (
                 ServerMessage::Connection("c-1".to_string()),
                 r#"{"Connection":"c-1"}"#,
@@ -901,7 +955,13 @@ mod tests {
     }
 
     #[test]
-    fn server_parses_heartbeat_with_any_payload() {
+    fn server_parses_heartbeat_bare_and_tagged() {
+        // The canonical form real servers put on the wire is the bare
+        // string; tagged spellings are tolerated.
+        assert_eq!(
+            parse_server_message(br#""Heartbeat""#).unwrap(),
+            ServerMessage::Heartbeat
+        );
         assert_eq!(
             parse_server_message(br#"{"Heartbeat":null}"#).unwrap(),
             ServerMessage::Heartbeat
@@ -909,6 +969,20 @@ mod tests {
         assert_eq!(
             parse_server_message(br#"{"Heartbeat":1}"#).unwrap(),
             ServerMessage::Heartbeat
+        );
+    }
+
+    #[test]
+    fn server_bare_heartbeat_is_not_mistaken_for_a_challenge() {
+        // Spore sends the challenge nonce as a bare string too; the literal
+        // "Heartbeat" must win over the challenge fallback.
+        assert_eq!(
+            parse_server_message(br#""Heartbeat""#).unwrap(),
+            ServerMessage::Heartbeat
+        );
+        assert_eq!(
+            parse_server_message(br#""550e8400-e29b-41d4-a716-446655440000""#).unwrap(),
+            ServerMessage::Challenge("550e8400-e29b-41d4-a716-446655440000".to_string())
         );
     }
 

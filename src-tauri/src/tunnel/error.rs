@@ -31,7 +31,8 @@ pub enum TunnelError {
     #[error("server connection lost: {0}")]
     Disconnected(String),
 
-    /// A Spore server stopped acknowledging within the keepalive window.
+    /// The server stopped sending keepalives (Heartbeat/Ack) within the
+    /// liveness window — dead without a FIN/RST ever reaching us.
     #[error("no acknowledgement from server within the keepalive window")]
     AckTimeout,
 }
