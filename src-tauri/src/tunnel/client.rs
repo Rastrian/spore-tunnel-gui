@@ -451,4 +451,47 @@ mod tests {
         }
         mock.stop().await;
     }
+
+    #[tokio::test]
+    async fn bore_handshake_over_nul_framing_survives_mid_session_heartbeat() {
+        // Integration: full start-to-connected handshake against a Bore
+        // mock speaking NUL-delimited JSON, then the server's periodic
+        // Heartbeat (bare string + NUL) must deserialize without killing
+        // the connection — a later Connection notification is still
+        // delivered and its data connection still claimable.
+        let mock = mock()
+            .ack_interval(Duration::from_millis(20))
+            .start()
+            .await
+            .unwrap();
+        let cfg = cfg_for(mock.control_addr());
+        let mut conn = TunnelClient::connect(&cfg, "").await.unwrap();
+        assert_eq!(conn.server_info().kind, ServerKind::Bore);
+        assert_eq!(conn.assigned_port(), mock.assigned_port());
+
+        // Mid-session keepalive from the server.
+        assert_eq!(
+            conn.next_message().await.unwrap(),
+            Some(ServerMessage::Heartbeat)
+        );
+
+        mock.trigger_connection().await.unwrap();
+        match conn.next_message().await.unwrap() {
+            Some(ServerMessage::Connection(id)) => {
+                let (mut stream, leftover) = open_data_connection(&cfg, "", &id)
+                    .await
+                    .unwrap();
+                let mut got = leftover;
+                let mut buf = [0u8; 64];
+                while got.len() < b"hello\n".len() {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    assert!(n > 0, "bridge closed before greeting");
+                    got.extend_from_slice(&buf[..n]);
+                }
+                assert!(got.starts_with(b"hello\n"), "got {got:?}");
+            }
+            other => panic!("expected Connection, got {other:?}"),
+        }
+        mock.stop().await;
+    }
 }
