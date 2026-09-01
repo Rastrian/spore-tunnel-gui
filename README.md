@@ -8,19 +8,15 @@ server. Both tunnel protocols are implemented natively in Rust: no `bore.exe`,
 no sidecar binaries, no CLI. One installer, a three-step wizard, and your
 service has a public address.
 
-<!-- Screenshots: replace the placeholders below with real captures.
-     Drop `dashboard.png` and `wizard.png` (1280×800-ish, PNG) into
-     docs/screenshots/ — see docs/screenshots/README.md. Keep the alt text. -->
-
 ![Dashboard — live tunnel with public address and stats](docs/screenshots/dashboard.png)
-![Onboarding wizard with local service detection](docs/screenshots/wizard.png)
+![Onboarding wizard](docs/screenshots/wizard.png)
 
 ## Features
 
 - **Multiple tunnels at once** — each profile (server + local service + ports)
   is an independent tunnel with its own status, logs and stats, startable and
   stoppable from the sidebar or the system tray.
-- **Native Bore + Spore protocol** — length-prefixed JSON control protocol with
+- **Native Bore + Spore protocol** — NUL-delimited JSON control protocol with
   HMAC-SHA256 authentication, implemented from scratch. Talks to plain Bore
   servers *and* Spore servers, negotiating the extended dialect safely (see
   [How it works](#how-it-works)).
