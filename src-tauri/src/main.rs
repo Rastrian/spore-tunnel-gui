@@ -36,6 +36,8 @@ pub fn run() {
             commands::copy_address,
             commands::open_config_folder,
             commands::detect_local_service,
+            commands::get_ui_prefs,
+            commands::update_ui_prefs,
         ])
         .run(tauri::generate_context!());
 

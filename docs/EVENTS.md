@@ -237,10 +237,27 @@ Profile fields: see `Profile` above.
 | `copy_address`          | `profileId?: string`                   | `string` (public `host:port`; rejects when not connected) |
 | `open_config_folder`    | —                                      | `void`                         |
 | `detect_local_service`  | —                                      | `DetectedService[]` (see `src-tauri/src/discover.rs`) |
+| `get_ui_prefs`          | —                                      | `UiPrefs`                      |
+| `update_ui_prefs`      | `prefs: UiPrefs`                       | `UiPrefs` (persisted)          |
 
 Secrets never appear in profile objects or config files — they are written
 through `set_profile_secret` (or the `start_tunnel` argument) into the OS
 keyring only.
+
+`UiPrefs` (defined in `src-tauri/src/config.rs`; shape mirrored in the
+frontend types) covers window/tray behavior:
+
+```ts
+interface UiPrefs {
+  theme: "dark" | "light" | "system";
+  startMinimized: boolean;
+  closeToTray: boolean;
+}
+```
+
+An unknown `theme` string fails deserialization of the `prefs` argument, so
+`update_ui_prefs` rejects it with an invoke error instead of persisting
+garbage.
 
 ---
 
