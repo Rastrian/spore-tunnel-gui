@@ -39,8 +39,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: v__VERSION__
-          releaseName: "Bore Minecraft Tunnel v__VERSION__"
-          releaseBody: "Windows installer for Bore Minecraft Tunnel. No external dependencies needed - the Bore/Spore tunnel protocol is implemented natively."
+          releaseName: "Spore Tunnel v__VERSION__"
+          releaseBody: "Windows installer for Spore Tunnel. No external dependencies needed - the Bore/Spore tunnel protocol is implemented natively."
           releaseDraft: true
           prerelease: false
 

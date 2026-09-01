@@ -1,8 +1,8 @@
 [package]
 name = "spore-tunnel-gui"
 version = "1.0.0"
-description = "A Windows app that runs Bore to expose a local Minecraft Java server"
-authors = ["bore-minecraft-tunnel"]
+description = "Expose local TCP services through Bore and Spore tunnel servers, natively"
+authors = ["Rastrian"]
 edition = "2021"
 
 [build-dependencies]
