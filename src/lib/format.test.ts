@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatRate, formatUptime, humanizeBytes } from "./format";
+import { formatClock, formatRate, formatUptime, humanizeBytes } from "./format";
 
 describe("humanizeBytes", () => {
   it("renders sub-KiB values as plain bytes", () => {
@@ -50,5 +50,13 @@ describe("formatRate", () => {
   it("appends the per-second unit", () => {
     expect(formatRate(0)).toBe("0 B/s");
     expect(formatRate(2048)).toBe("2.0 KiB/s");
+  });
+});
+
+describe("formatClock", () => {
+  it("renders local HH:MM:SS with zero padding", () => {
+    const ts = new Date(2026, 0, 2, 3, 4, 5).getTime();
+    expect(formatClock(ts)).toBe("03:04:05");
+    expect(formatClock(new Date(2026, 0, 2, 23, 0, 9).getTime())).toBe("23:00:09");
   });
 });

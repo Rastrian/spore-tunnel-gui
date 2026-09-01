@@ -31,3 +31,10 @@ export function formatRate(bytesPerSec: number): string {
   const rate = humanizeBytes(bytesPerSec);
   return rate === "0 B" ? "0 B/s" : `${rate}/s`;
 }
+
+/** Wall-clock HH:MM:SS for a log line's epoch-ms timestamp. */
+export function formatClock(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}

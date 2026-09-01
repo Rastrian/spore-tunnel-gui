@@ -7,6 +7,7 @@ import { STATE_BADGE, STATE_TEXT, isRunning, stateLabel } from "../lib/statusVie
 import { useTunnels } from "../store/tunnels";
 import { useUi } from "../store/ui";
 import { CopyButton } from "../components/CopyButton";
+import { LogConsole } from "../components/LogConsole";
 import { Sparkline } from "../components/Sparkline";
 import { StatusRing } from "../components/StatusRing";
 
@@ -164,6 +165,9 @@ export function DashboardView({ profile }: { profile: Profile }) {
         <Sparkline samples={samples ?? []} />
         <p className="mt-1.5 text-[11px] text-dim">last 60 seconds, sampled once per second</p>
       </section>
+
+      {/* Per-tunnel console: backfill + live tunnel://log stream. */}
+      <LogConsole profileId={profile.id} />
     </div>
   );
 }
