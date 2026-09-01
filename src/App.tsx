@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { Toast } from "./components/Toast";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { ProfileEditor, newDraftProfile } from "./components/ProfileEditor";
 import { DashboardView } from "./views/DashboardView";
 import { EmptyState } from "./views/EmptyState";
@@ -79,7 +80,10 @@ export default function App() {
   return (
     <div className="relative flex h-full w-full overflow-hidden bg-base font-sans text-ink">
       <Sidebar />
-      <main className="relative min-w-0 flex-1 overflow-y-auto">{main}</main>
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        <UpdateBanner />
+        <div className="min-h-0 flex-1 overflow-y-auto">{main}</div>
+      </main>
       {/* New profile = fresh draft (the editor copies it into local state
           on mount, so re-renders never reset what the user typed). */}
       {editor.open && <ProfileEditor profile={editing ?? newDraftProfile()} />}

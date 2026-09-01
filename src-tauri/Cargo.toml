@@ -1,8 +1,8 @@
 [package]
 name = "spore-tunnel-gui"
 version = "1.0.0"
-description = "A Windows app that runs Bore to expose a local Minecraft Java server"
-authors = ["bore-minecraft-tunnel"]
+description = "Expose local TCP services through Bore and Spore tunnel servers, natively"
+authors = ["Rastrian"]
 edition = "2021"
 
 [build-dependencies]
@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time"] }
 tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
 dirs = "6"
 keyring = "3"
 thiserror = "2"
@@ -21,6 +22,10 @@ hmac = "0.12"
 hex = "0.4"
 uuid = { version = "1", features = ["serde", "v4"] }
 open = "5"
+semver = "1"
+# Update checker only: no default features (drops native-tls & friends),
+# rustls keeps the binary lean and CI-safe.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -6,6 +6,7 @@ use spore_tunnel_gui::discover;
 use spore_tunnel_gui::tunnel::events::LogEntry;
 use spore_tunnel_gui::tunnel::manager::TunnelManager;
 use spore_tunnel_gui::tunnel::supervisor::TunnelStatus;
+use spore_tunnel_gui::updates;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
@@ -258,6 +259,20 @@ pub async fn open_config_folder() -> Result<(), String> {
 #[tauri::command]
 pub async fn detect_local_service() -> Result<Vec<discover::DetectedService>, String> {
     Ok(discover::detect_local_service().await)
+}
+
+// ---------------------------------------------------------------------
+// Update check
+// ---------------------------------------------------------------------
+
+/// Compare the running version against the latest GitHub release.
+/// Check-on-demand only (settings button) — no network call at startup.
+#[tauri::command]
+pub async fn check_for_updates(
+    app: tauri::AppHandle,
+) -> Result<updates::UpdateStatus, String> {
+    let current = app.package_info().version.to_string();
+    updates::check_with(&current, updates::fetch_latest_release).await
 }
 
 // ---------------------------------------------------------------------

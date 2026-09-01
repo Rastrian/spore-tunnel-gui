@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Import, Monitor, Moon, Sun } from "lucide-react";
+import { FolderOpen, Import, Monitor, Moon, RefreshCw, Sun } from "lucide-react";
 import { getVersion } from "@tauri-apps/api/app";
-import { importLegacy, openConfigFolder } from "../lib/api";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as autostartIsEnabled,
+} from "@tauri-apps/plugin-autostart";
+import { checkForUpdates, importLegacy, openConfigFolder } from "../lib/api";
+import {
+  defaultStorage,
+  formatLastChecked,
+  readLastChecked,
+  writeLastChecked,
+} from "../lib/updates";
 import type { Theme } from "../lib/types";
 import { currentPrefs, persistUiPrefs } from "../lib/prefs";
 import { useTunnels } from "../store/tunnels";
@@ -21,11 +32,66 @@ export function SettingsView() {
   const setHasLegacy = useTunnels((s) => s.setHasLegacy);
   const setSelection = useUi((s) => s.setSelection);
   const showToast = useUi((s) => s.showToast);
+  const showUpdateBanner = useUi((s) => s.showUpdateBanner);
+  const dismissUpdateBanner = useUi((s) => s.dismissUpdateBanner);
 
   const [version, setVersion] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importMessage, setImportMessage] = useState("");
   const [importError, setImportError] = useState("");
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState("");
+  const [lastChecked, setLastChecked] = useState<number | null>(() =>
+    readLastChecked(defaultStorage()),
+  );
+  // OS launch entry is the source of truth (no config mirror to drift).
+  const [autostart, setAutostart] = useState(false);
+
+  useEffect(() => {
+    autostartIsEnabled()
+      .then(setAutostart)
+      .catch((err: unknown) => console.error("autostart isEnabled failed", err));
+  }, []);
+
+  /** Optimistic toggle; re-reads the OS state so a failed write reverts. */
+  async function setAutostartEnabled(enabled: boolean) {
+    const previous = autostart;
+    setAutostart(enabled);
+    try {
+      if (enabled) {
+        await enableAutostart();
+      } else {
+        await disableAutostart();
+      }
+      setAutostart(await autostartIsEnabled());
+    } catch (err) {
+      setAutostart(previous);
+      showToast(String(err));
+    }
+  }
+
+  async function doUpdateCheck() {
+    setUpdateBusy(true);
+    setUpdateMessage("");
+    try {
+      const status = await checkForUpdates();
+      const now = Date.now();
+      writeLastChecked(now, defaultStorage());
+      setLastChecked(now);
+      if (status.updateAvailable) {
+        showUpdateBanner(status);
+        setUpdateMessage(`Version ${status.latest} is available.`);
+      } else {
+        // A calm re-check clears any banner from an earlier check.
+        dismissUpdateBanner();
+        setUpdateMessage(`You're up to date (${status.current}).`);
+      }
+    } catch (err) {
+      setUpdateMessage(String(err));
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
 
   useEffect(() => {
     getVersion()
@@ -94,6 +160,12 @@ export function SettingsView() {
       {/* Behavior */}
       <Section title="Behavior">
         <Toggle
+          checked={autostart}
+          onChange={(enabled) => void setAutostartEnabled(enabled)}
+          label="Start Spore Tunnel at login"
+          description="Launch the app when you sign in; profiles set to “Start with the app” connect automatically"
+        />
+        <Toggle
           checked={prefs?.startMinimized ?? false}
           onChange={(startMinimized) =>
             void persistUiPrefs({ ...currentPrefs(), startMinimized })
@@ -110,15 +182,18 @@ export function SettingsView() {
         <div className="flex items-center justify-between gap-4 pt-1">
           <div>
             <p className="text-[13px] font-medium">Updates</p>
-            <p className="text-[11.5px] text-dim">Coming in the next release.</p>
+            <p className="text-[11.5px] text-dim">
+              {updateMessage || formatLastChecked(lastChecked)}
+            </p>
           </div>
           <button
             type="button"
-            disabled
-            title="Coming in the next release"
-            className="rounded-card border border-line px-3.5 py-1.5 text-[12.5px] font-medium text-dim opacity-60"
+            onClick={() => void doUpdateCheck()}
+            disabled={updateBusy}
+            className="flex items-center gap-1.5 rounded-card border border-line bg-base px-3.5 py-1.5 text-[12.5px] font-medium text-ink transition-colors hover:border-accent/50 disabled:opacity-50"
           >
-            Check for updates
+            <RefreshCw size={13} className={updateBusy ? "animate-spin" : undefined} />
+            {updateBusy ? "Checking…" : "Check for updates"}
           </button>
         </div>
       </Section>
