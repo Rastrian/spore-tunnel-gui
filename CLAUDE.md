@@ -53,11 +53,17 @@ run `npm run build` for real UI work.
    failed (connection dropped / undecodable reply).
 2. Spore server answers `{"Hello": port}` (legacy mode) or `{"HelloEx": {"port": N}}`.
 3. `Challenge` (string) = server requires HMAC-SHA256(secret, nonce) auth.
-4. Spore sends periodic `Ack` frames on the control connection. A client that ignores
-   ACK death leaves **ghost ports** on the server. Supervisor must treat missing ACKs
-   within a window as death -> full teardown (control + all forwarders) -> retry with
-   backoff (5s -> 10s -> ... -> 60s cap, +-20% jitter).
-5. Plain bore servers never send ACKs — supervision there relies on TCP health only.
+4. Spore sends the bare string `"Heartbeat"` every 500 ms on the control connection
+   (`lib/spore/server.ex` `hello_loop`; verified 2026-09-01 — it never sends `"Ack"`).
+   A client that ignores keepalive death leaves **ghost ports** on the server. The
+   supervisor treats keepalive silence (Heartbeat or Ack) past `ack_window` as death
+   -> full teardown (control + all forwarders) -> retry with backoff
+   (5s -> 10s -> ... -> 60s cap, +-20% jitter).
+5. Real bore servers also send `ServerMessage::Heartbeat` (bare string) every ~500 ms
+   (`src/server.rs` control loop), so keepalive-window death applies to both dialects.
+   EOF/IO errors remain death signals everywhere. Clients must NEVER originate
+   heartbeat frames: bore's `ClientMessage` is a closed enum (undecodable frame ->
+   connection dropped) and Spore expects client silence on the control plane.
 
 ## Conventions
 
