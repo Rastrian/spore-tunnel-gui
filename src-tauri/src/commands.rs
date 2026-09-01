@@ -137,6 +137,19 @@ pub async fn start_tunnel(
     manager: State<'_, Arc<TunnelManager>>,
     store: State<'_, Arc<dyn SecretStore>>,
 ) -> Result<TunnelStatus, String> {
+    start_profile(profile_id, secret, manager.inner(), store.inner()).await
+}
+
+/// Body of [`start_tunnel`], shared with the tray's `start:<uuid>` menu
+/// item so both paths behave identically. Resolves the profile from the
+/// config, resolves its secret (argument > keyring > empty) and starts
+/// it, then waits briefly for the first connect attempt to settle.
+pub(crate) async fn start_profile(
+    profile_id: uuid::Uuid,
+    secret: Option<String>,
+    manager: &Arc<TunnelManager>,
+    store: &Arc<dyn SecretStore>,
+) -> Result<TunnelStatus, String> {
     let cfg = config::load_config()?;
     let profile = cfg
         .profiles

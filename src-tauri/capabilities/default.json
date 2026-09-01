@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities of the main window: core APIs (events, app info, window ops) so the webview can listen() to tunnel://* events and call getVersion().",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
