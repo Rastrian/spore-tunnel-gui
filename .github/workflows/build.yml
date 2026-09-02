@@ -1,8 +1,11 @@
 # Spore Tunnel CI/CD
 #
-# - PRs and pushes to main: test + build, upload installer artifact.
-# - Tag push (v*): same build, then PUBLISH a GitHub Release with the NSIS
-#   installer + SHA256SUMS.txt (consumed by the in-app update checker).
+# - PRs and pushes to main: test + build, upload installer artifacts
+#   (Windows on PRs and pushes; macOS only on pushes).
+# - Tag push (v*): the Windows and macOS builds both upload to the SAME draft
+#   release (tauri-action creates it on the first job and appends on the
+#   second), then the publish job regenerates SHA256SUMS.txt over every
+#   asset and publishes the release.
 #
 # Releases are tag-driven only. To cut one:
 #   git tag vX.Y.Z && git push origin vX.Y.Z
@@ -48,7 +51,8 @@ jobs:
 
       # Non-tag builds: builds the app and uploads nothing to releases
       # (releaseId output stays empty). Tag builds: uploads the NSIS
-      # installer to a DRAFT release named after the tag.
+      # installer to a DRAFT release named after the tag; checksums and
+      # publishing are handled by the publish job once both builds finish.
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -56,39 +60,20 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: "Spore Tunnel v__VERSION__"
-          releaseBody: "Windows installer for Spore Tunnel. The Bore/Spore tunnel protocol is implemented natively - no external binaries needed."
+          releaseBody: 'Windows: NSIS installer (per-user install, no admin needed). macOS: Apple Silicon (M1+) DMG - the app is unsigned, so on first open right-click "Spore Tunnel.app" and choose Open, or clear the quarantine flag with `xattr -cr "/Applications/Spore Tunnel.app"`. The Bore/Spore tunnel protocol is implemented natively - no external binaries needed.'
           releaseDraft: true
           prerelease: false
 
-      - name: Generate SHA256SUMS.txt
-        if: github.ref_type == 'tag'
+      # Guard against stale bundle artifacts restored by the Rust cache:
+      # keep only installers matching the current product name.
+      - name: Prune stale NSIS installers
         shell: pwsh
         run: |
           $dir = "src-tauri/target/release/bundle/nsis"
-          # Guard against stale bundle artifacts restored by the Rust cache:
-          # keep only installers matching the current product name.
           Get-ChildItem "$dir/*.exe" |
             Where-Object { $_.Name -notlike "Spore.Tunnel_*" } |
             Remove-Item -Force
-          $files = Get-ChildItem "$dir/Spore.Tunnel_*.exe" | Select-Object -ExpandProperty Name
-          if (-not $files) { Write-Error "no Spore.Tunnel_* installer found"; exit 1 }
-          $lines = foreach ($name in $files) {
-            $hash = (Get-FileHash "$dir/$name" -Algorithm SHA256).Hash.ToLower()
-            "$hash  $name"
-          }
-          $lines -join "`n" | Out-File -Encoding ascii "$dir/SHA256SUMS.txt"
-          Get-Content "$dir/SHA256SUMS.txt"
-
-      - name: Attach checksums and publish release
-        if: github.ref_type == 'tag'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = "${{ github.ref_name }}"
-          gh release upload "$tag" "src-tauri/target/release/bundle/nsis/SHA256SUMS.txt" --clobber
-          gh release edit "$tag" --draft=false
-          gh release view "$tag"
+          Get-ChildItem "$dir/Spore.Tunnel_*.exe" | Select-Object -ExpandProperty Name
 
       - name: Upload installer artifact
         if: github.ref_type != 'tag'
@@ -97,3 +82,82 @@ jobs:
           name: windows-installer-${{ github.sha }}
           path: src-tauri/target/release/bundle/nsis/*.exe
           retention-days: 30
+
+  build-macos:
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Frontend unit tests
+        run: npm test -- --run
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Non-tag builds: builds the app and uploads nothing to releases
+      # (releaseId output stays empty). Tag builds: appends the DMG to the
+      # draft release the Windows build created (or creates it first if it
+      # happens to win the race - both jobs target the same tag).
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "Spore Tunnel v__VERSION__"
+          releaseBody: 'Windows: NSIS installer (per-user install, no admin needed). macOS: Apple Silicon (M1+) DMG - the app is unsigned, so on first open right-click "Spore Tunnel.app" and choose Open, or clear the quarantine flag with `xattr -cr "/Applications/Spore Tunnel.app"`. The Bore/Spore tunnel protocol is implemented natively - no external binaries needed.'
+          releaseDraft: true
+          prerelease: false
+
+      - name: Upload DMG artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-${{ github.sha }}
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          retention-days: 30
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [build, build-macos]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release assets and generate SHA256SUMS.txt
+        run: |
+          TAG="${{ github.ref_name }}"
+          dir="release-assets"
+          rm -rf "$dir" && mkdir "$dir"
+          gh release download "$TAG" --clobber --dir "$dir"
+          # Drop any checksum file that came down with the assets, then
+          # regenerate it from scratch over the installers only.
+          rm -f "$dir/SHA256SUMS.txt"
+          cd "$dir"
+          sha256sum *.exe *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attach checksums and publish release
+        run: |
+          TAG="${{ github.ref_name }}"
+          gh release upload "$TAG" release-assets/SHA256SUMS.txt --clobber
+          gh release edit "$TAG" --draft=false
+          gh release view "$TAG"

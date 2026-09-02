@@ -2,11 +2,11 @@
 
 > Forked from [bore-tunnel-gui](https://github.com/Rastrian/bore-tunnel-gui) (MIT).
 
-A Windows desktop app that exposes local TCP services — Minecraft servers, game
-hosts, dev web servers — to the internet through a **Bore** or **Spore** tunnel
-server. Both tunnel protocols are implemented natively in Rust: no `bore.exe`,
-no sidecar binaries, no CLI. One installer, a three-step wizard, and your
-service has a public address.
+A desktop app for Windows and macOS that exposes local TCP services — Minecraft
+servers, game hosts, dev web servers — to the internet through a **Bore** or
+**Spore** tunnel server. Both tunnel protocols are implemented natively in
+Rust: no `bore.exe`, no sidecar binaries, no CLI. One download, a three-step
+wizard, and your service has a public address.
 
 ![Dashboard — live tunnel with public address and stats](docs/screenshots/dashboard.png)
 ![Onboarding wizard](docs/screenshots/wizard.png)
@@ -34,8 +34,8 @@ service has a public address.
 - **Reconnect with ACK supervision** — detects dead control connections fast
   (including Spore heartbeat loss) and tears everything down before retrying,
   which prevents ghost ports on the server (details below).
-- **Secrets stay in the OS keyring** — Windows Credential Manager, never in a
-  config file.
+- **Secrets stay in the OS keyring** — the OS credential store (Windows
+  Credential Manager), never in a config file.
 - **Update checker** — checks GitHub releases on demand and links you there.
 
 ## Server support
@@ -51,8 +51,9 @@ labels the tunnel `BORE` or `SPORE` in the UI.
 
 ## Quick start
 
-1. Download the latest installer from the [Releases](../../releases) page and
-   run it (Windows 10/11, per-user install, no admin needed).
+1. Download the latest release for your platform from the
+   [Releases](../../releases) page and run it (Windows 10/11: NSIS installer,
+   per-user install, no admin needed; macOS: see [macOS](#macos) below).
 2. Open the app — the first-run wizard appears.
 3. Pick what you are hosting (the wizard can detect a running local service)
    and enter the tunnel server host — `bore.pub` works out of the box.
@@ -60,6 +61,27 @@ labels the tunnel `BORE` or `SPORE` in the UI.
    refuses to start if nothing is listening locally.
 5. Click **Start** and copy the public address (e.g. `bore.pub:49152`).
 6. Share that address. Done.
+
+## macOS
+
+The macOS build targets **Apple Silicon (M1 or later) on macOS 11+**. Download
+the `Spore.Tunnel_<version>_aarch64.dmg` asset from the
+[Releases](../../releases) page and drag **Spore Tunnel** into `/Applications`.
+
+The app is **unsigned**, so Gatekeeper blocks the first launch. To get past it,
+either:
+
+- clear the quarantine flag once from Terminal (works on every macOS version):
+
+  ```bash
+  xattr -cr "/Applications/Spore Tunnel.app"
+  ```
+
+- on macOS 14 or older: right-click **Spore Tunnel** in `/Applications`,
+  choose **Open** and confirm in the dialog;
+- on macOS 15 (Sequoia) or newer: launch the app once (it will be blocked),
+  then open **System Settings → Privacy & Security**, scroll down and click
+  **Open Anyway** next to the Spore Tunnel warning.
 
 ## How it works
 
@@ -96,8 +118,8 @@ reflects the current one, so re-share it after a reconnect.
 
 ## Configuration
 
-Profiles live in `%APPDATA%\spore-tunnel-gui\config.json` (editable in the app;
-shown here for reference):
+Profiles live in the app's config file (`%APPDATA%\spore-tunnel-gui\config.json`
+on Windows; editable in the app; shown here for reference):
 
 ```json
 {
@@ -121,7 +143,7 @@ shown here for reference):
 
 - `remotePort: 0` lets the server assign a random available port.
 - Secrets are **not** in this file: each profile's secret is stored in the OS
-  keyring (Windows Credential Manager, service `spore-tunnel-gui`, account
+  keyring (on Windows, Credential Manager; service `spore-tunnel-gui`, account
   `profile:<id>`).
 - Users of the old bore-tunnel-gui app can import their config from
   Settings — the legacy config and its keyring secret are copied, never
@@ -140,7 +162,7 @@ shown here for reference):
 ```bash
 npm install        # frontend deps
 npm run tauri dev  # dev app with hot reload
-npm run tauri build  # NSIS installer under src-tauri/target/release/bundle/nsis/
+npm run tauri build  # installers under src-tauri/target/release/bundle/ (nsis/ on Windows, dmg/ on macOS)
 npm test           # frontend vitest suite
 ```
 
