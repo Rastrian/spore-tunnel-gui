@@ -1,6 +1,6 @@
 [package]
 name = "spore-tunnel-gui"
-version = "1.0.0"
+version = "1.0.1"
 description = "Expose local TCP services through Bore and Spore tunnel servers, natively"
 authors = ["Rastrian"]
 edition = "2021"
