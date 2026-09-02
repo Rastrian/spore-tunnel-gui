@@ -59,22 +59,16 @@ pub async fn set_active_profile(profile_id: uuid::Uuid) -> Result<(), String> {
     config::save_config(&cfg)
 }
 
-/// Store (or, when empty/whitespace, delete) a profile's tunnel secret.
+/// Store a profile's tunnel secret. Blank (empty/whitespace) is a no-op —
+/// the stored secret is kept, matching the editor's "leave blank to keep"
+/// field. Secrets are removed only by [`delete_profile`].
 #[tauri::command]
 pub async fn set_profile_secret(
     profile_id: uuid::Uuid,
     secret: String,
     store: State<'_, Arc<dyn SecretStore>>,
 ) -> Result<(), String> {
-    let secret = secret.trim();
-    let user = config::profile_secret_user(profile_id);
-    if secret.is_empty() {
-        // Absent entries are already "deleted"; ignore store errors here.
-        let _ = store.delete_secret(KEYRING_SERVICE, &user);
-        Ok(())
-    } else {
-        store.set_secret(KEYRING_SERVICE, &user, secret)
-    }
+    store_profile_secret(store.inner().as_ref(), profile_id, &secret)
 }
 
 #[tauri::command]
@@ -344,6 +338,23 @@ fn resolve_target_with(
     }
 }
 
+/// Pure core of [`set_profile_secret`]: a non-empty (trimmed) secret is
+/// stored; blank keeps the stored one and never deletes — an edit that
+/// leaves the field empty must not wipe an existing secret. Removing a
+/// secret is exclusively [`delete_profile`]'s job.
+fn store_profile_secret(
+    store: &dyn SecretStore,
+    profile_id: uuid::Uuid,
+    secret: &str,
+) -> Result<(), String> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return Ok(());
+    }
+    let user = config::profile_secret_user(profile_id);
+    store.set_secret(KEYRING_SERVICE, &user, secret)
+}
+
 /// Resolve a profile's start secret: a non-empty `provided` value wins
 /// (trimmed, remembered best-effort); otherwise the stored one. A keyring
 /// backend error (no secret-service daemon, missing DBus, ...) must NOT
@@ -502,6 +513,61 @@ mod tests {
             store.get_secret(KEYRING_SERVICE, user).unwrap(),
             Some("hunter2".to_string())
         );
+    }
+
+    #[test]
+    fn store_profile_secret_blank_keeps_the_stored_secret() {
+        let store = MemorySecretStore::new();
+        let id = Uuid::new_v4();
+
+        // Blank on a fresh profile is a no-op: no keyring entry appears.
+        for blank in ["", " ", "\t"] {
+            store_profile_secret(&store, id, blank).unwrap();
+        }
+        assert_eq!(
+            store.get_secret(KEYRING_SERVICE, &config::profile_secret_user(id)).unwrap(),
+            None
+        );
+
+        // Blank must NOT delete an existing secret: the editor's empty
+        // field means "keep the stored one" (see ProfileEditor).
+        store
+            .set_secret(KEYRING_SERVICE, &config::profile_secret_user(id), "s3cret")
+            .unwrap();
+        for blank in ["", " ", "\t"] {
+            store_profile_secret(&store, id, blank).unwrap();
+        }
+        assert_eq!(
+            store.get_secret(KEYRING_SERVICE, &config::profile_secret_user(id)).unwrap(),
+            Some("s3cret".to_string())
+        );
+    }
+
+    #[test]
+    fn store_profile_secret_stores_the_trimmed_value_and_replaces() {
+        let store = MemorySecretStore::new();
+        let id = Uuid::new_v4();
+        store_profile_secret(&store, id, "  hunter2  ").unwrap();
+        assert_eq!(
+            store.get_secret(KEYRING_SERVICE, &config::profile_secret_user(id)).unwrap(),
+            Some("hunter2".to_string())
+        );
+        // A later non-empty value replaces the earlier one.
+        store_profile_secret(&store, id, "n3w").unwrap();
+        assert_eq!(
+            store.get_secret(KEYRING_SERVICE, &config::profile_secret_user(id)).unwrap(),
+            Some("n3w".to_string())
+        );
+    }
+
+    #[test]
+    fn store_profile_secret_blank_never_touches_a_failing_backend() {
+        // Blank skips the keyring entirely, so an unusable backend (no
+        // secret-service daemon, missing DBus) cannot fail a plain edit.
+        let store = FailingSecretStore;
+        assert!(store_profile_secret(&store, Uuid::new_v4(), "   ").is_ok());
+        // A real value still propagates the backend error.
+        assert!(store_profile_secret(&store, Uuid::new_v4(), "x").is_err());
     }
 
     fn temp_dir() -> std::path::PathBuf {

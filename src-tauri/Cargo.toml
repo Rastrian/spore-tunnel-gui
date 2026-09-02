@@ -15,7 +15,15 @@ tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 dirs = "6"
-keyring = "3"
+# OS-native keyring backends for every CI/dev target. Without features the
+# keyring v3 default backend is the in-memory MOCK — secrets would be lost
+# on every app restart. Cargo unifies features per target, so each platform
+# picks its own backend from this list (Windows / macOS / Linux).
+keyring = { version = "3", features = [
+    "windows-native",
+    "apple-native",
+    "linux-native-sync-persistent",
+] }
 thiserror = "2"
 sha2 = "0.10"
 hmac = "0.12"
