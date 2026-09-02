@@ -65,7 +65,7 @@ labels the tunnel `BORE` or `SPORE` in the UI.
 ## macOS
 
 The macOS build targets **Apple Silicon (M1 or later) on macOS 11+**. Download
-the `Spore.Tunnel_<version>_aarch64.dmg` asset from the
+the `Spore Tunnel_<version>_aarch64.dmg` asset from the
 [Releases](../../releases) page and drag **Spore Tunnel** into `/Applications`.
 
 The app is **unsigned**, so Gatekeeper blocks the first launch. To get past it,
