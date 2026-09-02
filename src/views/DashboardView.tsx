@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, Play, RotateCw, Square } from "lucide-react";
+import { ArrowDown, ArrowUp, Pencil, Play, RotateCw, Square } from "lucide-react";
 import type { Profile } from "../lib/types";
 import { startTunnel, stopTunnel } from "../lib/api";
 import { formatRate, formatUptime, humanizeBytes } from "../lib/format";
@@ -17,6 +17,7 @@ export function DashboardView({ profile }: { profile: Profile }) {
   const samples = useTunnels((s) => s.samples[profile.id]);
   const applyStatus = useTunnels((s) => s.applyStatus);
   const showToast = useUi((s) => s.showToast);
+  const openEditor = useUi((s) => s.openEditor);
   const [busy, setBusy] = useState(false);
 
   const state = status?.state ?? "idle";
@@ -73,6 +74,15 @@ export function DashboardView({ profile }: { profile: Profile }) {
                 {status.serverKind === "Spore" ? "SPORE" : "BORE"}
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => openEditor(profile.id)}
+              title="Edit profile"
+              aria-label={`Edit ${profile.name}`}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-dim transition-colors hover:bg-surface hover:text-ink"
+            >
+              <Pencil size={13} />
+            </button>
           </div>
           <p className={`text-[13px] ${STATE_TEXT[state]}`}>{stateLabel(state)}</p>
 
