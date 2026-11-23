@@ -14,7 +14,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt-multi-thread", "macros", "time"] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
-dirs = "6"
+dirs = "7"
 # OS-native keyring backends for every CI/dev target. Without features the
 # keyring v3 default backend is the in-memory MOCK — secrets would be lost
 # on every app restart. Cargo unifies features per target, so each platform
