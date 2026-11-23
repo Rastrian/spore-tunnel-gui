@@ -54,7 +54,7 @@ jobs:
       # installer to a DRAFT release named after the tag; checksums and
       # publishing are handled by the publish job once both builds finish.
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -114,7 +114,7 @@ jobs:
       # draft release the Windows build created (or creates it first if it
       # happens to win the race - both jobs target the same tag).
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
